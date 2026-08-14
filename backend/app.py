@@ -1,5 +1,7 @@
 from flask import Flask, render_template, request, jsonify, send_file
 from flask_cors import CORS
+import base64
+import binascii
 from url_validator import (
     validate_youtube_url,
     is_playlist_url,
@@ -58,14 +60,20 @@ DOWNLOAD_FOLDER.mkdir(exist_ok=True, mode=0o700)
 
 TEMP_DIR = Path(tempfile.gettempdir()) / "youtube_downloader"
 TEMP_DIR.mkdir(exist_ok=True, mode=0o700)
+COOKIE_CACHE_FILE = TEMP_DIR / "cookies.txt"
 
 # Limits
 MAX_PLAYLIST_SIZE = int(os.environ.get("MAX_PLAYLIST_SIZE", "50"))
 MAX_DOWNLOADS_PER_HOUR = int(os.environ.get("MAX_DOWNLOADS_PER_HOUR", "10"))
 MAX_DOWNLOADS_PER_DAY = int(os.environ.get("MAX_DOWNLOADS_PER_DAY", "50"))
-MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "50"))
+# 250 MB accommodates long podcasts at the configured 192 kbps bitrate
+# without selecting a shorter fallback format because of the size cap.
+MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "250"))
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "3"))
 DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", "300"))
+DOWNLOAD_LIVESTREAM_FROM_START = (
+    os.environ.get("DOWNLOAD_LIVESTREAM_FROM_START", "true").lower() == "true"
+)
 PORT = int(os.environ.get("PORT", "5000"))
 BITRATE = os.environ.get("BITRATE", "192")
 JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", "3600"))  # 1 hour
@@ -81,9 +89,22 @@ YOUTUBE_PLAYER_CLIENTS = [
 ]
 
 # Optional auth/egress knobs for getting past YouTube's bot check on
-# datacenter IPs. See _apply_auth_opts() for details.
+# datacenter IPs. See _apply_auth_opts() for details. Cookie content can be
+# supplied either as a mounted Netscape file or as base64 in a secret env var.
 COOKIE_FILE = os.environ.get("COOKIE_FILE", "").strip()
+YOUTUBE_COOKIES_B64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
 YOUTUBE_PROXY = os.environ.get("YOUTUBE_PROXY", "").strip()
+YOUTUBE_USER_AGENT = os.environ.get("YOUTUBE_USER_AGENT", "").strip()
+YOUTUBE_COOKIE_BEHAVIOR = os.environ.get(
+    "YOUTUBE_COOKIE_BEHAVIOR", "when_needed"
+).strip().lower()
+if YOUTUBE_COOKIE_BEHAVIOR not in {"disabled", "when_needed", "all"}:
+    logger.warning(
+        "Invalid YOUTUBE_COOKIE_BEHAVIOR=%r; using when_needed",
+        YOUTUBE_COOKIE_BEHAVIOR,
+    )
+    YOUTUBE_COOKIE_BEHAVIOR = "when_needed"
+_cookie_cache_lock = threading.Lock()
 
 # /api/health probes this stable public video to see if YouTube extraction
 # currently works. Results are cached to avoid re-hitting YouTube on every poll.
@@ -233,8 +254,8 @@ def make_progress_hook(job_id, video_index=0, total_videos=1):
     return hook
 
 
-def get_ydl_opts(output_path=None, progress_hook=None):
-    """Get yt-dlp options with proper format selection"""
+def get_ydl_opts(output_path=None, progress_hook=None, use_cookies=None):
+    """Get yt-dlp options with proper format selection."""
     opts = {
         "format": "bestaudio/best",
         "outtmpl": (
@@ -263,8 +284,12 @@ def get_ydl_opts(output_path=None, progress_hook=None):
         "socket_timeout": 30,
         "retries": 3,
         "fragment_retries": 3,
-        "skip_unavailable_fragments": True,
+        # Never return a silently truncated file when a media fragment fails.
+        "skip_unavailable_fragments": False,
         "keepvideo": False,
+        # The reported example is a YouTube live broadcast. Without this,
+        # yt-dlp starts at the current live point instead of the beginning.
+        "live_from_start": DOWNLOAD_LIVESTREAM_FROM_START,
         "noplaylist": False,
         "concurrent_fragment_downloads": 4,
         "max_filesize": MAX_FILE_SIZE_MB * 1024 * 1024,
@@ -277,11 +302,11 @@ def get_ydl_opts(output_path=None, progress_hook=None):
     }
     if progress_hook:
         opts["progress_hooks"] = [progress_hook]
-    return _apply_auth_opts(opts)
+    return _apply_auth_opts(opts, use_cookies=use_cookies)
 
 
-def get_info_opts():
-    """Get yt-dlp options for info extraction"""
+def get_info_opts(use_cookies=None):
+    """Get yt-dlp options for info extraction."""
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -297,7 +322,7 @@ def get_info_opts():
             }
         },
     }
-    return _apply_auth_opts(opts)
+    return _apply_auth_opts(opts, use_cookies=use_cookies)
 
 
 def _file_is_writable(path):
@@ -315,13 +340,55 @@ def _file_is_writable(path):
         return False
 
 
-def _writable_cookie_file():
-    """Return a writable path to the configured cookies file, or None.
+def _write_env_cookie_file():
+    """Decode base64 Netscape cookies into a private, writable temp file.
 
-    yt-dlp saves the cookie jar back to the file after each request, so it
-    must point at a writable file. If COOKIE_FILE is read-only (e.g. a Render
-    secret file), copy it into the writable temp dir first.
+    Environment variables are useful on Render because they avoid relying on
+    the exact mount path and preserve the cookie file's newlines. The decoded
+    file never appears in logs and is restricted to the application user.
     """
+    if not YOUTUBE_COOKIES_B64:
+        return None
+
+    try:
+        encoded = "".join(YOUTUBE_COOKIES_B64.split())
+        cookie_data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as e:
+        logger.warning(f"YOUTUBE_COOKIES_B64 is not valid base64: {e}")
+        return None
+
+    if not cookie_data.startswith(
+        (b"# HTTP Cookie File", b"# Netscape HTTP Cookie File")
+    ):
+        logger.warning(
+            "YOUTUBE_COOKIES_B64 is not a Netscape-format cookies.txt file; "
+            "continuing without cookies"
+        )
+        return None
+
+    with _cookie_cache_lock:
+        try:
+            COOKIE_CACHE_FILE.write_bytes(cookie_data)
+            os.chmod(COOKIE_CACHE_FILE, 0o600)
+            return str(COOKIE_CACHE_FILE)
+        except OSError as e:
+            logger.warning(
+                f"Could not write decoded YouTube cookies to {COOKIE_CACHE_FILE}: {e}"
+            )
+            return None
+
+
+def _writable_cookie_file():
+    """Return a writable path to configured cookies, or None.
+
+    yt-dlp saves the cookie jar back to the file after requests, so a Render
+    secret file mounted read-only is copied into the writable temp directory.
+    The base64 env-var source is preferred when both sources are configured.
+    """
+    env_cookie_file = _write_env_cookie_file()
+    if env_cookie_file:
+        return env_cookie_file
+
     if not COOKIE_FILE or not os.path.isfile(COOKIE_FILE):
         if COOKIE_FILE:
             logger.warning(
@@ -333,36 +400,84 @@ def _writable_cookie_file():
     if _file_is_writable(COOKIE_FILE):
         return COOKIE_FILE
 
-    dest = TEMP_DIR / "cookies.txt"
     try:
-        shutil.copyfile(COOKIE_FILE, dest)
-        return str(dest)
+        shutil.copyfile(COOKIE_FILE, COOKIE_CACHE_FILE)
+        os.chmod(COOKIE_CACHE_FILE, 0o600)
+        return str(COOKIE_CACHE_FILE)
     except OSError as e:
         logger.warning(
-            f"COOKIE_FILE is read-only and could not be copied to {dest}: {e}; "
-            "continuing without cookies"
+            f"COOKIE_FILE is read-only and could not be copied to "
+            f"{COOKIE_CACHE_FILE}: {e}; continuing without cookies"
         )
         return None
 
 
-def _apply_auth_opts(opts):
+def _apply_auth_opts(opts, use_cookies=None):
     """Attach optional cookies.txt / proxy settings to yt-dlp options.
 
     On datacenter IPs (Render) YouTube bot-checks anonymous requests, so a
     deployed instance can authenticate with browser cookies and/or route
     through a residential proxy to escape IP flagging.
 
-    COOKIE_FILE  — path to a Netscape-format cookies.txt exported from a
-                   logged-in browser session (mounted into the container).
-    YOUTUBE_PROXY — e.g. "http://user:pass@residential-proxy:port".
+    COOKIE_FILE       — path to a Netscape-format cookies.txt exported from a
+                         logged-in browser session (mounted into the container).
+    YOUTUBE_COOKIES_B64 — base64-encoded Netscape cookie content.
+    YOUTUBE_PROXY     — e.g. "http://user:pass@residential-proxy:port".
+    YOUTUBE_USER_AGENT — optional browser User-Agent matching the cookies.
     """
-    if COOKIE_FILE:
+    if use_cookies is None:
+        use_cookies = YOUTUBE_COOKIE_BEHAVIOR == "all"
+    if use_cookies and YOUTUBE_COOKIE_BEHAVIOR != "disabled":
         cookie_path = _writable_cookie_file()
         if cookie_path:
             opts["cookiefile"] = cookie_path
     if YOUTUBE_PROXY:
         opts["proxy"] = YOUTUBE_PROXY
+    if YOUTUBE_USER_AGENT:
+        opts["http_headers"] = {"User-Agent": YOUTUBE_USER_AGENT}
     return opts
+
+
+def _is_cookie_retryable_error(exc):
+    """Return whether a failure may be resolved by authenticated cookies."""
+    msg = (str(exc) or "").lower()
+    return any(
+        phrase in msg
+        for phrase in (
+            "not a bot",
+            "sign in",
+            "login",
+            "age-restricted",
+            "age restricted",
+            "http error 403",
+        )
+    )
+
+
+def _extract_info_with_cookie_retry(url, opts_factory, download=False):
+    """Extract with the configured cookie policy.
+
+    ``when_needed`` deliberately makes the first request anonymous and retries
+    only authentication-like failures with cookies. This limits cookie use and
+    follows yt-dlp's warning that YouTube cookies can be rotated or associated
+    with an IP address. ``all`` starts authenticated, while ``disabled`` never
+    supplies cookies.
+    """
+    use_cookies = YOUTUBE_COOKIE_BEHAVIOR == "all"
+    try:
+        with yt_dlp.YoutubeDL(opts_factory(use_cookies)) as ydl:
+            return ydl.extract_info(url, download=download)
+    except Exception as exc:
+        if (
+            YOUTUBE_COOKIE_BEHAVIOR != "when_needed"
+            or not _is_cookie_retryable_error(exc)
+            or not _writable_cookie_file()
+        ):
+            raise
+
+        logger.info("Retrying YouTube extraction with cookies after an auth-related failure")
+        with yt_dlp.YoutubeDL(opts_factory(True)) as ydl:
+            return ydl.extract_info(url, download=download)
 
 
 def _friendly_ytdlp_error(exc):
@@ -376,7 +491,10 @@ def _friendly_ytdlp_error(exc):
     msg = (str(exc) or "").lower()
 
     if "not a bot" in msg:
-        if COOKIE_FILE:
+        if (
+            YOUTUBE_COOKIE_BEHAVIOR != "disabled"
+            and (COOKIE_FILE or YOUTUBE_COOKIES_B64)
+        ):
             return (
                 "YouTube is still bot-checking the server. The configured "
                 "cookies are likely expired or invalid — refresh cookies.txt."
@@ -384,7 +502,10 @@ def _friendly_ytdlp_error(exc):
         return "YouTube is blocking this server with a bot check. Try again later."
 
     if "sign in" in msg or "login" in msg:
-        if COOKIE_FILE:
+        if (
+            YOUTUBE_COOKIE_BEHAVIOR != "disabled"
+            and (COOKIE_FILE or YOUTUBE_COOKIES_B64)
+        ):
             return "Your YouTube session has expired. Refresh cookies.txt and try again."
         return "This video requires sign-in (it may be age-restricted or members-only)."
 
@@ -408,14 +529,20 @@ def _run_health_check():
         "detail": None,
         "exception": None,
         "checked_at": datetime.now(timezone.utc).isoformat(),
-        "cookies_configured": bool(COOKIE_FILE),
+        "cookie_behavior": YOUTUBE_COOKIE_BEHAVIOR,
+        "cookies_configured": bool(COOKIE_FILE or YOUTUBE_COOKIES_B64),
+        "cookies_available": bool(
+            YOUTUBE_COOKIE_BEHAVIOR != "disabled" and _writable_cookie_file()
+        ),
         "proxy_configured": bool(YOUTUBE_PROXY),
         "canary_url": HEALTH_CHECK_URL,
         "ttl_seconds": HEALTH_CHECK_TTL_SECONDS,
     }
     try:
-        with yt_dlp.YoutubeDL(get_info_opts()) as ydl:
-            info = ydl.extract_info(HEALTH_CHECK_URL, download=False)
+        info = _extract_info_with_cookie_retry(
+            HEALTH_CHECK_URL,
+            get_info_opts,
+        )
         if not info or not info.get("id"):
             result["status"] = "error"
             result["detail"] = "Extraction returned no result"
@@ -426,6 +553,70 @@ def _run_health_check():
         result["detail"] = _friendly_ytdlp_error(e) or msg[:300]
         result["status"] = "blocked" if "not a bot" in msg.lower() else "error"
         return result
+
+
+def _media_duration_seconds(media_path):
+    """Read a media file's duration with ffprobe, or return None on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(media_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+        return float(result.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def validate_media_duration(media_path, expected_seconds):
+    """Return an error for a suspiciously truncated output, otherwise None."""
+    try:
+        expected = float(expected_seconds or 0)
+    except (TypeError, ValueError):
+        return None
+
+    if expected <= 0:
+        return None
+
+    actual = _media_duration_seconds(media_path)
+    if actual is None:
+        return "Could not verify the downloaded file duration"
+
+    # FFprobe duration and YouTube's reported duration can differ by a small
+    # amount on a complete file (container overhead, rounding, bitrate
+    # estimation). Only reject when the file is materially shorter; log small
+    # differences so a legitimate download is never blocked.
+    if actual >= expected:
+        return None
+
+    shortfall = expected - actual
+    tolerance = max(60.0, expected * 0.03)
+    if shortfall > tolerance:
+        return (
+            f"Incomplete download detected ({actual / 60:.1f} minutes of "
+            f"approximately {expected / 60:.1f})"
+        )
+
+    logger.warning(
+        "Downloaded duration is %.1fs shorter than expected %.1fs for %s; "
+        "accepting as a small metadata difference",
+        shortfall,
+        expected,
+        media_path,
+    )
+    return None
 
 
 def convert_to_mp3(input_file, output_file):
@@ -487,31 +678,45 @@ def download_single_video(url, job_id, client_ip):
 
         with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp_dir:
             temp_path = Path(temp_dir)
-            ydl_opts = get_ydl_opts(
-                temp_path / "%(title)s.%(ext)s",
-                progress_hook=make_progress_hook(job_id),
+            output_path = temp_path / "%(title)s.%(ext)s"
+            progress_hook = make_progress_hook(job_id)
+            video_info = _extract_info_with_cookie_retry(
+                url,
+                lambda use_cookies: get_ydl_opts(
+                    output_path,
+                    progress_hook=progress_hook,
+                    use_cookies=use_cookies,
+                ),
+                download=True,
             )
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                video_info = ydl.extract_info(url, download=True)
+            if video_info:
+                title = sanitize_filename(video_info.get("title", "video"))
+                result_path = find_mp3(temp_path, title)
 
-                if video_info:
-                    title = sanitize_filename(video_info.get("title", "video"))
-                    result_path = find_mp3(temp_path, title)
-
-                    if result_path:
-                        # Move to download folder
-                        final_file = DOWNLOAD_FOLDER / f"{uuid.uuid4().hex}_{title}.mp3"
-                        shutil.move(str(result_path), str(final_file))
-
+                if result_path:
+                    duration_error = validate_media_duration(
+                        result_path, video_info.get("duration")
+                    )
+                    if duration_error:
+                        result_path.unlink(missing_ok=True)
                         with jobs_lock:
-                            download_jobs[job_id]["status"] = "completed"
-                            download_jobs[job_id]["progress"] = 100
-                            download_jobs[job_id]["file"] = str(final_file)
-                            download_jobs[job_id]["filename"] = f"{title}.mp3"
-
-                        record_download(client_ip)
+                            download_jobs[job_id]["status"] = "failed"
+                            download_jobs[job_id]["error"] = duration_error
                         return
+
+                    # Move to download folder
+                    final_file = DOWNLOAD_FOLDER / f"{uuid.uuid4().hex}_{title}.mp3"
+                    shutil.move(str(result_path), str(final_file))
+
+                    with jobs_lock:
+                        download_jobs[job_id]["status"] = "completed"
+                        download_jobs[job_id]["progress"] = 100
+                        download_jobs[job_id]["file"] = str(final_file)
+                        download_jobs[job_id]["filename"] = f"{title}.mp3"
+
+                    record_download(client_ip)
+                    return
 
         with jobs_lock:
             download_jobs[job_id]["status"] = "failed"
@@ -538,106 +743,117 @@ def download_playlist(url, job_id, client_ip):
         playlist_url = normalize_playlist_url(url)
 
         # Get playlist info
-        with yt_dlp.YoutubeDL(get_info_opts()) as ydl:
-            info = ydl.extract_info(playlist_url, download=False)
+        info = _extract_info_with_cookie_retry(playlist_url, get_info_opts)
 
-            if not info or "entries" not in info:
-                with jobs_lock:
-                    download_jobs[job_id]["status"] = "failed"
-                    download_jobs[job_id]["error"] = "Invalid playlist"
-                return
+        if not info or "entries" not in info:
+            with jobs_lock:
+                download_jobs[job_id]["status"] = "failed"
+                download_jobs[job_id]["error"] = "Invalid playlist"
+            return
 
-            total_videos = len(info["entries"])
-            if total_videos > MAX_PLAYLIST_SIZE:
-                with jobs_lock:
-                    download_jobs[job_id]["status"] = "failed"
-                    download_jobs[job_id][
-                        "error"
-                    ] = f"Playlist too large. Maximum {MAX_PLAYLIST_SIZE} videos"
-                return
+        total_videos = len(info["entries"])
+        if total_videos > MAX_PLAYLIST_SIZE:
+            with jobs_lock:
+                download_jobs[job_id]["status"] = "failed"
+                download_jobs[job_id][
+                    "error"
+                ] = f"Playlist too large. Maximum {MAX_PLAYLIST_SIZE} videos"
+            return
 
-            playlist_title = sanitize_filename(info.get("title", "playlist"))
-            downloaded_files = []
-            used_names = set()
+        playlist_title = sanitize_filename(info.get("title", "playlist"))
+        downloaded_files = []
+        used_names = set()
 
-            for i, entry in enumerate(info["entries"]):
-                video_url = entry.get("url") or entry.get("webpage_url")
-                if not video_url:
-                    continue
+        for i, entry in enumerate(info["entries"]):
+            video_url = entry.get("url") or entry.get("webpage_url")
+            if not video_url:
+                continue
 
-                with jobs_lock:
-                    download_jobs[job_id]["progress"] = (i / total_videos) * 100
-                    download_jobs[job_id]["current_video"] = i + 1
-                    download_jobs[job_id]["total_videos"] = total_videos
+            with jobs_lock:
+                download_jobs[job_id]["progress"] = (i / total_videos) * 100
+                download_jobs[job_id]["current_video"] = i + 1
+                download_jobs[job_id]["total_videos"] = total_videos
 
-                try:
-                    with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp_dir:
-                        temp_path = Path(temp_dir)
-                        ydl_opts = get_ydl_opts(
-                            temp_path / "%(title)s.%(ext)s",
-                            progress_hook=make_progress_hook(
-                                job_id, video_index=i, total_videos=total_videos
-                            ),
+            try:
+                with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp_dir:
+                    temp_path = Path(temp_dir)
+                    output_path = temp_path / "%(title)s.%(ext)s"
+                    progress_hook = make_progress_hook(
+                        job_id, video_index=i, total_videos=total_videos
+                    )
+
+                    def make_video_opts(use_cookies):
+                        opts = get_ydl_opts(
+                            output_path,
+                            progress_hook=progress_hook,
+                            use_cookies=use_cookies,
                         )
-                        ydl_opts["noplaylist"] = True
+                        opts["noplaylist"] = True
+                        return opts
 
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl_video:
-                            video_info = ydl_video.extract_info(
-                                video_url, download=True
+                    video_info = _extract_info_with_cookie_retry(
+                        video_url,
+                        make_video_opts,
+                        download=True,
+                    )
+
+                    if video_info:
+                        title = sanitize_filename(
+                            video_info.get("title", f"video_{i}")
+                        )
+                        result_path = find_mp3(temp_path, title)
+                        if result_path:
+                            duration_error = validate_media_duration(
+                                result_path, video_info.get("duration")
                             )
+                            if duration_error:
+                                result_path.unlink(missing_ok=True)
+                                raise ValueError(duration_error)
 
-                            if video_info:
-                                title = sanitize_filename(
-                                    video_info.get("title", f"video_{i}")
-                                )
-                                result_path = find_mp3(temp_path, title)
-                                if result_path:
-                                    final_path = (
-                                        DOWNLOAD_FOLDER
-                                        / f"{uuid.uuid4().hex}_{title}.mp3"
-                                    )
-                                    shutil.move(str(result_path), str(final_path))
-                                    downloaded_files.append(
-                                        {
-                                            "title": title,
-                                            "filename": unique_zip_name(
-                                                title, used_names
-                                            ),
-                                            "file": str(final_path),
-                                        }
-                                    )
-                except Exception as e:
-                    logger.error(f"Error downloading video {i}: {str(e)}")
-                    continue
+                            final_path = (
+                                DOWNLOAD_FOLDER
+                                / f"{uuid.uuid4().hex}_{title}.mp3"
+                            )
+                            shutil.move(str(result_path), str(final_path))
+                            downloaded_files.append(
+                                {
+                                    "title": title,
+                                    "filename": unique_zip_name(title, used_names),
+                                    "file": str(final_path),
+                                }
+                            )
+            except Exception as e:
+                logger.error(f"Error downloading video {i}: {str(e)}")
+                continue
 
-            if not downloaded_files:
-                with jobs_lock:
-                    download_jobs[job_id]["status"] = "failed"
-                    download_jobs[job_id]["error"] = "No videos could be downloaded"
-                return
+        if not downloaded_files:
+            with jobs_lock:
+                download_jobs[job_id]["status"] = "failed"
+                download_jobs[job_id]["error"] = "No videos could be downloaded"
+            return
 
-            # Create zip if multiple files
-            if len(downloaded_files) > 1:
-                zip_path = DOWNLOAD_FOLDER / f"{uuid.uuid4().hex}_{playlist_title}.zip"
-                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                    for file_info in downloaded_files:
-                        zip_file.write(file_info["file"], file_info["filename"])
-                        os.unlink(file_info["file"])  # Clean up individual files
+        # Create zip if multiple files
+        if len(downloaded_files) > 1:
+            zip_path = DOWNLOAD_FOLDER / f"{uuid.uuid4().hex}_{playlist_title}.zip"
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                for file_info in downloaded_files:
+                    zip_file.write(file_info["file"], file_info["filename"])
+                    os.unlink(file_info["file"])  # Clean up individual files
 
-                with jobs_lock:
-                    download_jobs[job_id]["status"] = "completed"
-                    download_jobs[job_id]["progress"] = 100
-                    download_jobs[job_id]["file"] = str(zip_path)
-                    download_jobs[job_id]["filename"] = f"{playlist_title}.zip"
-            else:
-                file_info = downloaded_files[0]
-                with jobs_lock:
-                    download_jobs[job_id]["status"] = "completed"
-                    download_jobs[job_id]["progress"] = 100
-                    download_jobs[job_id]["file"] = file_info["file"]
-                    download_jobs[job_id]["filename"] = file_info["filename"]
+            with jobs_lock:
+                download_jobs[job_id]["status"] = "completed"
+                download_jobs[job_id]["progress"] = 100
+                download_jobs[job_id]["file"] = str(zip_path)
+                download_jobs[job_id]["filename"] = f"{playlist_title}.zip"
+        else:
+            file_info = downloaded_files[0]
+            with jobs_lock:
+                download_jobs[job_id]["status"] = "completed"
+                download_jobs[job_id]["progress"] = 100
+                download_jobs[job_id]["file"] = file_info["file"]
+                download_jobs[job_id]["filename"] = file_info["filename"]
 
-            record_download(client_ip)
+        record_download(client_ip)
 
     except Exception as e:
         logger.exception(f"Playlist download error for job {job_id}: {str(e)}")
@@ -673,46 +889,61 @@ def get_video_info():
         return jsonify({"error": error_message}), 400
 
     try:
-        with yt_dlp.YoutubeDL(get_info_opts()) as ydl:
-            info = ydl.extract_info(normalize_playlist_url(url), download=False)
+        info = _extract_info_with_cookie_retry(
+            normalize_playlist_url(url),
+            get_info_opts,
+        )
 
-            if info is None:
-                return jsonify({"error": "Could not fetch video information"}), 500
+        if info is None:
+            return jsonify({"error": "Could not fetch video information"}), 500
 
-            if "entries" in info and info.get("_type") == "playlist":
-                total_videos = len(info["entries"])
-                is_limited = total_videos > MAX_PLAYLIST_SIZE
-
-                videos = []
-                for entry in info["entries"][:10]:
-                    if entry:
-                        videos.append(
-                            {
-                                "title": entry.get("title", "Unknown"),
-                                "duration": entry.get("duration", 0),
-                            }
+        if info.get("is_live"):
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            "This video is currently live. Wait for the stream to "
+                            "end before downloading so the full broadcast is available."
                         )
+                    }
+                ),
+                400,
+            )
 
-                return jsonify(
-                    {
-                        "type": "playlist",
-                        "title": info.get("title", "Unknown Playlist"),
-                        "count": total_videos,
-                        "is_limited": is_limited,
-                        "max_allowed": MAX_PLAYLIST_SIZE,
-                        "videos": videos,
-                    }
-                )
-            else:
-                return jsonify(
-                    {
-                        "type": "video",
-                        "title": info.get("title", "Unknown"),
-                        "duration": info.get("duration", 0),
-                        "thumbnail": info.get("thumbnail", ""),
-                        "uploader": info.get("uploader", "Unknown"),
-                    }
-                )
+        if "entries" in info and info.get("_type") == "playlist":
+            total_videos = len(info["entries"])
+            is_limited = total_videos > MAX_PLAYLIST_SIZE
+
+            videos = []
+            for entry in info["entries"][:10]:
+                if entry:
+                    videos.append(
+                        {
+                            "title": entry.get("title", "Unknown"),
+                            "duration": entry.get("duration", 0),
+                        }
+                    )
+
+            return jsonify(
+                {
+                    "type": "playlist",
+                    "title": info.get("title", "Unknown Playlist"),
+                    "count": total_videos,
+                    "is_limited": is_limited,
+                    "max_allowed": MAX_PLAYLIST_SIZE,
+                    "videos": videos,
+                }
+            )
+        else:
+            return jsonify(
+                {
+                    "type": "video",
+                    "title": info.get("title", "Unknown"),
+                    "duration": info.get("duration", 0),
+                    "thumbnail": info.get("thumbnail", ""),
+                    "uploader": info.get("uploader", "Unknown"),
+                }
+            )
 
     except Exception as e:
         logger.exception(f"Info error [{type(e).__name__}]: {str(e)}")
@@ -782,6 +1013,28 @@ def download_video():
     is_valid, error_message = validate_youtube_url(url)
     if not is_valid:
         return jsonify({"error": error_message}), 400
+
+    # Refuse downloads of broadcasts that are still live: only the portion
+    # already aired would be downloadable, which the duration check rejects.
+    try:
+        info = _extract_info_with_cookie_retry(
+            normalize_playlist_url(url),
+            get_info_opts,
+        )
+        if info and info.get("is_live"):
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            "This video is currently live. Wait for the stream to "
+                            "end before downloading so the full broadcast is available."
+                        )
+                    }
+                ),
+                400,
+            )
+    except Exception as e:
+        logger.warning(f"Could not check live status for {url}: {e}")
 
     client_ip = get_client_ip()
 

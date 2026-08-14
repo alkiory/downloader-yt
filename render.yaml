@@ -23,14 +23,25 @@ services:
       # Match the directory the Dockerfile pre-creates with uid-1000 ownership.
       - key: DOWNLOAD_DIR
         value: /app/downloads
+      # Long podcasts at 192 kbps can exceed 50 MB; keep enough room for
+      # multi-hour audio while retaining an explicit upper bound.
+      - key: MAX_FILE_SIZE_MB
+        value: "250"
+      - key: DOWNLOAD_LIVESTREAM_FROM_START
+        value: "true"
       # Render sits behind a reverse proxy that appends the real client IP to
       # X-Forwarded-For; trust the rightmost entry (see rate_limiter.py).
       - key: USE_X_FORWARDED_FOR
         value: "true"
+      # Online-only: local `python app.py` and `docker compose up` default to
+      # no rate limiting, so only this deployed service throttles requests.
       - key: RATE_LIMIT_ENABLED
         value: "true"
       - key: RATE_LIMIT_STORAGE
         value: memory
+      # Job status polling during long downloads must not hit a 30/hour cap.
+      - key: DEFAULT_RATE_LIMIT
+        value: "60 per minute, 3600 per hour"
       # Player clients yt-dlp tries, in order. `web` is omitted on purpose (it
       # now needs a PO token and is the most bot-checked from datacenter IPs).
       - key: YOUTUBE_PLAYER_CLIENTS
@@ -46,6 +57,17 @@ services:
       # Render mounts it at /etc/secrets/cookies.txt.
       - key: COOKIE_FILE
         value: /etc/secrets/cookies.txt
+      # Alternative to a Secret File: paste base64-encoded Netscape cookie
+      # content into this secret environment variable. It takes precedence over
+      # COOKIE_FILE and is decoded into a private writable temp file at runtime.
+      - key: YOUTUBE_COOKIES_B64
+        sync: false
+      # Safer default: anonymous first, retry with cookies only when needed.
+      - key: YOUTUBE_COOKIE_BEHAVIOR
+        value: when_needed
+      # Optional browser User-Agent matching the browser that produced cookies.
+      - key: YOUTUBE_USER_AGENT
+        sync: false
       # Residential proxy URL (e.g. http://user:pass@host:port). Secret value:
       # Render prompts for this when you first create the Blueprint.
       - key: YOUTUBE_PROXY

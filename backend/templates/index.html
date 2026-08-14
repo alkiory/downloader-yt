@@ -18,6 +18,17 @@
   <meta name="twitter:title" content="YouTube Audio Downloader - Free MP3 Converter">
   <meta name="twitter:description" content="Download YouTube videos as MP3 audio files. Perfect for offline listening!">
   <title>YouTube Audio Downloader - Free MP3 Converter</title>
+  <script>
+    (function () {
+      try {
+        const savedTheme = localStorage.getItem('youtube-downloader-theme');
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.dataset.theme = savedTheme || (prefersDark ? 'dark' : 'light');
+      } catch (error) {
+        document.documentElement.dataset.theme = 'light';
+      }
+    })();
+  </script>
   <style>
     * {
       margin: 0;
@@ -26,6 +37,7 @@
     }
 
     :root {
+      color-scheme: light;
       --primary: #ff0000;
       --primary-dark: #cc0000;
       --bg: #f9f9f9;
@@ -34,13 +46,65 @@
       --text-light: #666666;
       --border: #e0e0e0;
       --success: #4caf50;
+      --page-bg: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      --input-bg: #ffffff;
+      --legal-bg: #fff8e1;
+      --legal-border: #ffe0b2;
+      --legal-text: #8a6d3b;
+      --error-bg: #fff0f0;
+      --error-text: #d32f2f;
+      --success-bg: #f0fff0;
+      --success-text: #2e7d32;
+      --primary-focus: rgba(255, 0, 0, 0.1);
       --shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
       --radius: 12px;
     }
 
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #202124;
+      --card-bg: #292a2d;
+      --text: #f1f3f4;
+      --text-light: #bdc1c6;
+      --border: #484a4f;
+      --page-bg: linear-gradient(135deg, #171b35 0%, #302044 100%);
+      --input-bg: #202124;
+      --legal-bg: #3b321c;
+      --legal-border: #66521f;
+      --legal-text: #f2d28b;
+      --error-bg: #3c2023;
+      --error-text: #ffaaa9;
+      --success-bg: #1d3827;
+      --success-text: #9de2ae;
+      --primary-focus: rgba(255, 100, 100, 0.2);
+      --shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme]) {
+        color-scheme: dark;
+        --bg: #202124;
+        --card-bg: #292a2d;
+        --text: #f1f3f4;
+        --text-light: #bdc1c6;
+        --border: #484a4f;
+        --page-bg: linear-gradient(135deg, #171b35 0%, #302044 100%);
+        --input-bg: #202124;
+        --legal-bg: #3b321c;
+        --legal-border: #66521f;
+        --legal-text: #f2d28b;
+        --error-bg: #3c2023;
+        --error-text: #ffaaa9;
+        --success-bg: #1d3827;
+        --success-text: #9de2ae;
+        --primary-focus: rgba(255, 100, 100, 0.2);
+        --shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+      }
+    }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      background: var(--page-bg);
       min-height: 100vh;
       display: flex;
       align-items: flex-start;
@@ -69,7 +133,7 @@
     .card {
       background: var(--card-bg);
       border-radius: var(--radius);
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      box-shadow: var(--shadow);
       padding: 40px 30px;
       transition: transform 0.3s ease;
     }
@@ -81,6 +145,51 @@
     .header {
       text-align: center;
       margin-bottom: 30px;
+    }
+
+    .header-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 8px;
+    }
+
+    .theme-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--input-bg);
+      color: var(--text);
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+    }
+
+    .theme-toggle:hover {
+      background: var(--bg);
+      transform: translateY(-1px);
+    }
+
+    .theme-toggle:focus-visible {
+      outline: 3px solid var(--primary-focus);
+      outline-offset: 2px;
+    }
+
+    .theme-icon {
+      width: 16px;
+      height: 16px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    [data-theme="light"] .theme-icon-sun,
+    [data-theme="dark"] .theme-icon-moon {
+      display: none;
     }
 
     .logo {
@@ -128,9 +237,9 @@
     }
 
     .legal-notice {
-      background: #fff8e1;
-      border: 1px solid #ffe0b2;
-      color: #8a6d3b;
+      background: var(--legal-bg);
+      border: 1px solid var(--legal-border);
+      color: var(--legal-text);
       border-radius: var(--radius);
       padding: 12px 16px;
       font-size: 13px;
@@ -153,11 +262,17 @@
       font-size: 16px;
       transition: all 0.3s ease;
       outline: none;
+      background: var(--input-bg);
+      color: var(--text);
+    }
+
+    .url-input::placeholder {
+      color: var(--text-light);
     }
 
     .url-input:focus {
       border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(255, 0, 0, 0.1);
+      box-shadow: 0 0 0 3px var(--primary-focus);
     }
 
     .btn {
@@ -293,8 +408,23 @@
     }
 
     .feature-icon {
-      font-size: 24px;
+      color: var(--primary);
       margin-bottom: 10px;
+    }
+
+    .feature-svg {
+      width: 42px;
+      height: 42px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.7;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      transition: transform 0.25s ease;
+    }
+
+    .feature:hover .feature-svg {
+      transform: translateY(-3px) scale(1.05);
     }
 
     .feature h4 {
@@ -309,8 +439,8 @@
     }
 
     .error-message {
-      background: #fff0f0;
-      color: #d32f2f;
+      background: var(--error-bg);
+      color: var(--error-text);
       padding: 15px;
       border-radius: var(--radius);
       margin-top: 15px;
@@ -319,8 +449,8 @@
     }
 
     .success-message {
-      background: #f0fff0;
-      color: #2e7d32;
+      background: var(--success-bg);
+      color: var(--success-text);
       padding: 15px;
       border-radius: var(--radius);
       margin-top: 15px;
@@ -580,6 +710,18 @@
   <div class="container">
     <main class="card" role="main">
       <header class="header">
+        <div class="header-actions">
+          <button type="button" class="theme-toggle" id="themeToggle" aria-label="Switch to dark mode">
+            <svg class="theme-icon theme-icon-moon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 12.8A8.5 8.5 0 1 1 11.2 3 6.7 6.7 0 0 0 21 12.8Z" />
+            </svg>
+            <svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+            </svg>
+            <span id="themeToggleLabel">Dark mode</span>
+          </button>
+        </div>
         <div class="logo">
           <svg viewBox="0 0 24 24">
             <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
@@ -613,17 +755,36 @@
 
       <section class="features">
         <article class="feature">
-          <div class="feature-icon">🎵</div>
+          <!-- Minimalistic inline SVGs keep the page dependency-free. -->
+          <div class="feature-icon" aria-hidden="true">
+            <svg class="feature-svg" viewBox="0 0 24 24">
+              <path d="M9 18V5l10-2v13" />
+              <circle cx="6" cy="18" r="3" />
+              <circle cx="16" cy="16" r="3" />
+            </svg>
+          </div>
           <h4>High Quality MP3</h4>
           <p>192kbps audio quality</p>
         </article>
         <article class="feature">
-          <div class="feature-icon">📱</div>
+          <div class="feature-icon" aria-hidden="true">
+            <svg class="feature-svg" viewBox="0 0 24 24">
+              <rect x="6" y="2" width="12" height="20" rx="2" />
+              <path d="M10 5h4M11 18h2" />
+            </svg>
+          </div>
           <h4>Mobile Friendly</h4>
           <p>Works on all devices</p>
         </article>
         <article class="feature">
-          <div class="feature-icon">🎯</div>
+          <div class="feature-icon" aria-hidden="true">
+            <svg class="feature-svg" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="9" />
+              <circle cx="12" cy="12" r="5" />
+              <circle cx="12" cy="12" r="1.5" />
+              <path d="m16.5 7.5 3-3M17 4.5h2v2" />
+            </svg>
+          </div>
           <h4>Playlist Support</h4>
           <p>Download entire playlists</p>
         </article>
@@ -707,7 +868,7 @@
             </tr>
             <tr>
               <th>File size</th>
-              <td>Up to 50 MB per audio</td>
+              <td>Up to 250 MB per audio</td>
             </tr>
             <tr>
               <th>Concurrency</th>
@@ -737,6 +898,7 @@
             <li class="cant">Download <strong>video</strong> — this tool extracts audio (MP3) only.</li>
             <li class="cant">Download from sites other than YouTube.</li>
             <li class="cant">Download private, age-restricted, or region-locked videos.</li>
+            <li class="cant">Download broadcasts that are still <strong>live</strong> — wait for them to end.</li>
             <li class="cant">Remove DRM or bypass copyright protection.</li>
           </ul>
           <p style="margin-top:10px;">Only download videos you own or have permission to use.</p>
@@ -794,6 +956,11 @@
                 can't be downloaded.</p>
             </details>
             <details class="faq-item">
+              <summary>Why can't I download a livestream?</summary>
+              <p class="faq-answer">Live broadcasts are rejected because only the already-aired portion exists.
+                Wait until the stream ends, then download the complete archive.</p>
+            </details>
+            <details class="faq-item">
               <summary>How long are my files kept?</summary>
               <p class="faq-answer">Files are removed automatically after about 1 hour, so download them right away.</p>
             </details>
@@ -809,6 +976,57 @@
   </div>
 
   <script>
+    const themeToggle = document.getElementById('themeToggle');
+    const themeToggleLabel = document.getElementById('themeToggleLabel');
+    const themeStorageKey = 'youtube-downloader-theme';
+    let themePreference;
+
+    try {
+      themePreference = localStorage.getItem(themeStorageKey) || 'system';
+    } catch (error) {
+      themePreference = 'system';
+    }
+
+    function systemPrefersDark() {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches;
+    }
+
+    function applyTheme(preference, persist) {
+      const isDark = preference === 'dark' || (preference === 'system' && systemPrefersDark());
+      const resolvedTheme = isDark ? 'dark' : 'light';
+      document.documentElement.dataset.theme = resolvedTheme;
+      themeToggleLabel.textContent = isDark ? 'Light mode' : 'Dark mode';
+      themeToggle.setAttribute('aria-label', isDark ? 'Switch to light mode' : 'Switch to dark mode');
+
+      if (persist) {
+        try {
+          localStorage.setItem(themeStorageKey, preference);
+        } catch (error) {
+          // The theme still works when storage is unavailable.
+        }
+      }
+    }
+
+    applyTheme(themePreference, false);
+
+    const colorSchemeQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleSystemThemeChange = () => {
+      if (themePreference === 'system') {
+        applyTheme('system', false);
+      }
+    };
+    if (colorSchemeQuery.addEventListener) {
+      colorSchemeQuery.addEventListener('change', handleSystemThemeChange);
+    } else {
+      colorSchemeQuery.addListener(handleSystemThemeChange);
+    }
+
+    themeToggle.addEventListener('click', () => {
+      const currentTheme = document.documentElement.dataset.theme;
+      themePreference = currentTheme === 'dark' ? 'light' : 'dark';
+      applyTheme(themePreference, true);
+    });
+
     async function handleSubmit(event) {
       event.preventDefault();
 
@@ -887,12 +1105,35 @@
     }
 
     async function pollDownloadStatus(jobId) {
-      const maxAttempts = 300; // 5 minutes max
+      const maxAttempts = 1800; // 30 minutes max for long podcasts/live archives
       let attempts = 0;
 
       while (attempts < maxAttempts) {
+        let response;
         try {
-          const response = await fetch(`/api/download/${jobId}`);
+          response = await fetch(`/api/download/${jobId}`);
+
+          if (response.status === 429) {
+            // Rate limited: honor Retry-After and resume polling instead of failing.
+            const retryAfter = response.headers.get('Retry-After');
+            const waitSeconds = retryAfter ? parseInt(retryAfter, 10) : 5;
+            attempts += Math.min(waitSeconds || 5, 30);
+            await new Promise(resolve => setTimeout(resolve, (waitSeconds || 5) * 1000));
+            continue;
+          }
+
+          if (response.status === 404) {
+            updateProgress(0, 'Download no longer available');
+            showMessage('This download is no longer available (the server may have restarted). Please try again.', 'error');
+            return;
+          }
+
+          if (!response.ok) {
+            updateProgress(0, 'Status check failed');
+            showMessage(`Status check failed (HTTP ${response.status}). Please try again.`, 'error');
+            return;
+          }
+
           const status = await response.json();
 
           if (status.status === 'completed') {

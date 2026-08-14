@@ -1,3 +1,4 @@
+import base64
 import os
 import tempfile
 import unittest
@@ -67,18 +68,64 @@ class GetYdlOptsTest(unittest.TestCase):
         for opts in (app.get_ydl_opts(), app.get_info_opts()):
             self.assertNotIn("ignoreerrors", opts)
 
+    def test_long_downloads_do_not_skip_fragments_or_use_old_size_cap(self):
+        opts = app.get_ydl_opts()
+        self.assertFalse(opts["skip_unavailable_fragments"])
+        self.assertEqual(opts["live_from_start"], app.DOWNLOAD_LIVESTREAM_FROM_START)
+        self.assertEqual(opts["max_filesize"], app.MAX_FILE_SIZE_MB * 1024 * 1024)
+
+
+class MediaDurationTest(unittest.TestCase):
+    def test_accepts_complete_output(self):
+        probe_result = mock.Mock(returncode=0, stdout="4342.0\n")
+        with mock.patch.object(app.subprocess, "run", return_value=probe_result):
+            self.assertIsNone(app.validate_media_duration("podcast.mp3", 4342))
+
+    def test_accepts_small_metadata_difference(self):
+        # FFprobe can report a few percent less than YouTube's stated
+        # duration on a complete file; that must not block the download.
+        probe_result = mock.Mock(returncode=0, stdout="4240.0\n")
+        with mock.patch.object(app.subprocess, "run", return_value=probe_result):
+            self.assertIsNone(app.validate_media_duration("podcast.mp3", 4342))
+
+    def test_rejects_truncated_output(self):
+        probe_result = mock.Mock(returncode=0, stdout="667.0\n")
+        with mock.patch.object(app.subprocess, "run", return_value=probe_result):
+            error = app.validate_media_duration("podcast.mp3", 4342)
+        self.assertIn("Incomplete download detected", error)
+        self.assertIn("11.1 minutes", error)
+
+    def test_rejects_output_when_duration_cannot_be_verified(self):
+        probe_result = mock.Mock(returncode=1, stdout="")
+        with mock.patch.object(app.subprocess, "run", return_value=probe_result):
+            error = app.validate_media_duration("podcast.mp3", 4342)
+        self.assertIn("Could not verify", error)
+
 
 class AuthOptsTest(unittest.TestCase):
     """Cookies.txt / proxy are wired into yt-dlp opts only when configured."""
 
     def setUp(self):
-        self._saved = (app.COOKIE_FILE, app.YOUTUBE_PROXY)
+        self._saved = (
+            app.COOKIE_FILE,
+            app.YOUTUBE_COOKIES_B64,
+            app.YOUTUBE_PROXY,
+            app.YOUTUBE_USER_AGENT,
+            app.YOUTUBE_COOKIE_BEHAVIOR,
+        )
         self._tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
         self._tmp.write(b"# Netscape HTTP Cookie File")
         self._tmp.close()
+        app.YOUTUBE_COOKIE_BEHAVIOR = "all"
 
     def tearDown(self):
-        app.COOKIE_FILE, app.YOUTUBE_PROXY = self._saved
+        (
+            app.COOKIE_FILE,
+            app.YOUTUBE_COOKIES_B64,
+            app.YOUTUBE_PROXY,
+            app.YOUTUBE_USER_AGENT,
+            app.YOUTUBE_COOKIE_BEHAVIOR,
+        ) = self._saved
         os.unlink(self._tmp.name)
         dest = app.TEMP_DIR / "cookies.txt"
         if dest.exists():
@@ -86,38 +133,72 @@ class AuthOptsTest(unittest.TestCase):
 
     def test_no_auth_opts_by_default(self):
         app.COOKIE_FILE = ""
+        app.YOUTUBE_COOKIES_B64 = ""
         app.YOUTUBE_PROXY = ""
+        app.YOUTUBE_USER_AGENT = ""
         for opts in (app.get_ydl_opts(), app.get_info_opts()):
             self.assertNotIn("cookiefile", opts)
             self.assertNotIn("proxy", opts)
 
     def test_cookie_file_is_passed_when_present(self):
         app.COOKIE_FILE = self._tmp.name
+        app.YOUTUBE_COOKIES_B64 = ""
         app.YOUTUBE_PROXY = ""
-        for opts in (app.get_ydl_opts(), app.get_info_opts()):
+        app.YOUTUBE_USER_AGENT = ""
+        for opts in (
+            app.get_ydl_opts(use_cookies=True),
+            app.get_info_opts(use_cookies=True),
+        ):
             self.assertEqual(opts["cookiefile"], self._tmp.name)
             self.assertNotIn("proxy", opts)
 
+    def test_when_needed_starts_without_cookies(self):
+        app.COOKIE_FILE = self._tmp.name
+        app.YOUTUBE_COOKIES_B64 = ""
+        app.YOUTUBE_PROXY = ""
+        app.YOUTUBE_USER_AGENT = ""
+        app.YOUTUBE_COOKIE_BEHAVIOR = "when_needed"
+        for opts in (app.get_ydl_opts(), app.get_info_opts()):
+            self.assertNotIn("cookiefile", opts)
+
     def test_missing_cookie_file_is_skipped(self):
         app.COOKIE_FILE = "/nonexistent/cookies.txt"
+        app.YOUTUBE_COOKIES_B64 = ""
         app.YOUTUBE_PROXY = ""
+        app.YOUTUBE_USER_AGENT = ""
         for opts in (app.get_ydl_opts(), app.get_info_opts()):
             self.assertNotIn("cookiefile", opts)
 
     def test_readonly_cookie_file_is_copied_to_writable_location(self):
         app.COOKIE_FILE = self._tmp.name
+        app.YOUTUBE_COOKIES_B64 = ""
         app.YOUTUBE_PROXY = ""
+        app.YOUTUBE_USER_AGENT = ""
         with mock.patch.object(app, "_file_is_writable", return_value=False):
-            opts = app.get_info_opts()
+            opts = app.get_info_opts(use_cookies=True)
         dest = app.TEMP_DIR / "cookies.txt"
         self.assertEqual(opts["cookiefile"], str(dest))
         self.assertTrue(dest.exists())
 
-    def test_proxy_is_passed(self):
+    def test_base64_cookie_content_is_written_and_passed(self):
         app.COOKIE_FILE = ""
+        app.YOUTUBE_COOKIES_B64 = base64.b64encode(
+            b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tFALSE\t0\tSID\tvalue\n"
+        ).decode()
+        app.YOUTUBE_PROXY = ""
+        app.YOUTUBE_USER_AGENT = ""
+        opts = app.get_info_opts(use_cookies=True)
+        self.assertEqual(opts["cookiefile"], str(app.COOKIE_CACHE_FILE))
+        self.assertTrue(app.COOKIE_CACHE_FILE.read_bytes().startswith(b"# Netscape"))
+
+    def test_proxy_and_user_agent_are_passed(self):
+        app.COOKIE_FILE = ""
+        app.YOUTUBE_COOKIES_B64 = ""
         app.YOUTUBE_PROXY = "http://user:pass@proxy.example:8080"
+        app.YOUTUBE_USER_AGENT = "Mozilla/5.0 test"
         for opts in (app.get_ydl_opts(), app.get_info_opts()):
             self.assertEqual(opts["proxy"], "http://user:pass@proxy.example:8080")
+            self.assertEqual(opts["http_headers"], {"User-Agent": "Mozilla/5.0 test"})
             self.assertNotIn("cookiefile", opts)
 
 
@@ -125,10 +206,20 @@ class FriendlyYtdlpErrorTest(unittest.TestCase):
     """yt-dlp failures map to actionable, user-safe messages."""
 
     def setUp(self):
-        self._saved = app.COOKIE_FILE
+        self._saved = (
+            app.COOKIE_FILE,
+            app.YOUTUBE_COOKIES_B64,
+            app.YOUTUBE_COOKIE_BEHAVIOR,
+        )
+        app.YOUTUBE_COOKIES_B64 = ""
+        app.YOUTUBE_COOKIE_BEHAVIOR = "when_needed"
 
     def tearDown(self):
-        app.COOKIE_FILE = self._saved
+        (
+            app.COOKIE_FILE,
+            app.YOUTUBE_COOKIES_B64,
+            app.YOUTUBE_COOKIE_BEHAVIOR,
+        ) = self._saved
 
     def test_bot_check_without_cookies(self):
         app.COOKIE_FILE = ""
@@ -234,6 +325,76 @@ class _FakeYDL:
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
+
+
+class CookieRetryTest(unittest.TestCase):
+    def setUp(self):
+        self._saved = (
+            app.YOUTUBE_COOKIE_BEHAVIOR,
+            app.COOKIE_FILE,
+            app.YOUTUBE_COOKIES_B64,
+        )
+
+    def tearDown(self):
+        (
+            app.YOUTUBE_COOKIE_BEHAVIOR,
+            app.COOKIE_FILE,
+            app.YOUTUBE_COOKIES_B64,
+        ) = self._saved
+
+    def test_when_needed_retries_auth_failure_with_cookies(self):
+        app.YOUTUBE_COOKIE_BEHAVIOR = "when_needed"
+        app.COOKIE_FILE = "/etc/secrets/cookies.txt"
+        app.YOUTUBE_COOKIES_B64 = ""
+        options = []
+        bot = Exception("Sign in to confirm you're not a bot.")
+        success = {"id": "video", "title": "Video"}
+        with mock.patch.object(
+            app.yt_dlp,
+            "YoutubeDL",
+            side_effect=[_FakeYDL(bot), _FakeYDL(success)],
+        ), mock.patch.object(
+            app, "_writable_cookie_file", return_value="/tmp/cookies.txt"
+        ):
+            result = app._extract_info_with_cookie_retry(
+                "https://www.youtube.com/watch?v=video",
+                lambda use_cookies: options.append(use_cookies) or {},
+            )
+
+        self.assertEqual(result, success)
+        self.assertEqual(options, [False, True])
+
+    def test_when_needed_does_not_retry_unrelated_failure(self):
+        app.YOUTUBE_COOKIE_BEHAVIOR = "when_needed"
+        options = []
+        with mock.patch.object(
+            app.yt_dlp,
+            "YoutubeDL",
+            return_value=_FakeYDL(Exception("video unavailable")),
+        ), mock.patch.object(
+            app, "_writable_cookie_file", return_value="/tmp/cookies.txt"
+        ):
+            with self.assertRaisesRegex(Exception, "video unavailable"):
+                app._extract_info_with_cookie_retry(
+                    "https://www.youtube.com/watch?v=video",
+                    lambda use_cookies: options.append(use_cookies) or {},
+                )
+
+        self.assertEqual(options, [False])
+
+    def test_all_starts_with_cookies(self):
+        app.YOUTUBE_COOKIE_BEHAVIOR = "all"
+        options = []
+        with mock.patch.object(
+            app.yt_dlp,
+            "YoutubeDL",
+            return_value=_FakeYDL({"id": "video"}),
+        ):
+            app._extract_info_with_cookie_retry(
+                "https://www.youtube.com/watch?v=video",
+                lambda use_cookies: options.append(use_cookies) or {},
+            )
+        self.assertEqual(options, [True])
 
 
 class HealthCheckTest(unittest.TestCase):

@@ -52,6 +52,9 @@ class GetClientIpTest(unittest.TestCase):
 
 
 class CreateLimiterTest(unittest.TestCase):
+    def test_local_default_is_no_rate_limiting(self):
+        self.assertFalse(rate_limiter.RATE_LIMIT_ENABLED)
+
     def test_disabled_limiter(self):
         app = Flask(__name__)
         with mock.patch.object(rate_limiter, "RATE_LIMIT_ENABLED", False):

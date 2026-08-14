@@ -14,7 +14,10 @@ TRUSTED_PROXIES = (
 USE_X_FORWARDED_FOR = (
     os.environ.get("USE_X_FORWARDED_FOR", "true").lower() == "true"
 )  # Enable for Render
-RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "true").lower() == "true"
+# Local runs (`python app.py` and `docker compose up`) must not throttle
+# development or long downloads. Only online deployments that set this
+# explicitly (see render.yaml) enable rate limiting.
+RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "false").lower() == "true"
 
 
 def get_client_ip():
@@ -58,8 +61,12 @@ def create_limiter(app):
     return Limiter(
         app=app,
         key_func=get_client_ip,
+        # Applies to everything without an explicit @limiter.limit, e.g. job
+        # status polling (/api/download/<job_id>) during a long download. 60
+        # per minute is 1 poll/second while staying bounded. /api/info and
+        # /api/download keep their own stricter limits.
         default_limits=[
-            os.environ.get("DEFAULT_RATE_LIMIT", "100 per day, 30 per hour")
+            os.environ.get("DEFAULT_RATE_LIMIT", "60 per minute, 3600 per hour")
         ],
         storage_uri=storage_uri,
         headers_enabled=True,
