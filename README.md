@@ -48,6 +48,8 @@ Copy `.env.example` to `.env` and adjust as needed:
 - `YOUTUBE_PLAYER_CLIENTS`: YouTube player clients yt-dlp tries, in order (default: `android,ios`)
 - `COOKIE_FILE`: Path to a Netscape-format `cookies.txt` from a logged-in browser session (for datacenter hosts)
 - `YOUTUBE_PROXY`: Proxy URL (e.g. `http://user:pass@residential-proxy:port`) to escape datacenter-IP flagging
+- `HEALTH_CHECK_URL`: Canary video `/api/health` probes to test extraction (default: `jNQXAC9IVRw`)
+- `HEALTH_CHECK_TTL_SECONDS`: How long `/api/health` caches its result (default: `60`)
 
 ## Tests
 
@@ -75,6 +77,10 @@ docker-compose up -d
 # Check logs
 docker-compose logs -f
 ```
+
+`GET /api/health` reports whether YouTube extraction currently works (returns
+`status: ok | blocked | error`, plus whether cookies/proxy are configured). It
+probes a canary video and caches the result for `HEALTH_CHECK_TTL_SECONDS`.
 
 > **YouTube bot check on cloud hosts:** datacenter IPs (Render, AWS, etc.) are often
 > asked to *"Sign in to confirm you're not a bot."* To work around it, export a

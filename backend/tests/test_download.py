@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import app
 
@@ -60,6 +61,12 @@ class GetYdlOptsTest(unittest.TestCase):
         opts = app.get_ydl_opts(progress_hook=sentinel)
         self.assertEqual(opts["progress_hooks"], [sentinel])
 
+    def test_ignoreerrors_not_set_so_errors_surface(self):
+        # `ignoreerrors` would make extract_info() return None on a bot check
+        # instead of raising, hiding the real reason from our friendly handler.
+        for opts in (app.get_ydl_opts(), app.get_info_opts()):
+            self.assertNotIn("ignoreerrors", opts)
+
 
 class AuthOptsTest(unittest.TestCase):
     """Cookies.txt / proxy are wired into yt-dlp opts only when configured."""
@@ -73,6 +80,9 @@ class AuthOptsTest(unittest.TestCase):
     def tearDown(self):
         app.COOKIE_FILE, app.YOUTUBE_PROXY = self._saved
         os.unlink(self._tmp.name)
+        dest = app.TEMP_DIR / "cookies.txt"
+        if dest.exists():
+            dest.unlink()
 
     def test_no_auth_opts_by_default(self):
         app.COOKIE_FILE = ""
@@ -93,6 +103,15 @@ class AuthOptsTest(unittest.TestCase):
         app.YOUTUBE_PROXY = ""
         for opts in (app.get_ydl_opts(), app.get_info_opts()):
             self.assertNotIn("cookiefile", opts)
+
+    def test_readonly_cookie_file_is_copied_to_writable_location(self):
+        app.COOKIE_FILE = self._tmp.name
+        app.YOUTUBE_PROXY = ""
+        with mock.patch.object(app, "_file_is_writable", return_value=False):
+            opts = app.get_info_opts()
+        dest = app.TEMP_DIR / "cookies.txt"
+        self.assertEqual(opts["cookiefile"], str(dest))
+        self.assertTrue(dest.exists())
 
     def test_proxy_is_passed(self):
         app.COOKIE_FILE = ""
@@ -136,6 +155,15 @@ class FriendlyYtdlpErrorTest(unittest.TestCase):
         app.COOKIE_FILE = ""
         msg = app._friendly_ytdlp_error(Exception("HTTP Error 403: Forbidden"))
         self.assertIn("403", msg)
+
+    def test_cookie_file_os_error_does_not_map_to_session_expired(self):
+        # A read-only-mount error mentions "cookies.txt" in the path but is not
+        # an auth failure, so it must not be reported as an expired session.
+        app.COOKIE_FILE = "/etc/secrets/cookies.txt"
+        msg = app._friendly_ytdlp_error(
+            Exception("[Errno 30] Read-only file system: '/etc/secrets/cookies.txt'")
+        )
+        self.assertIsNone(msg)
 
     def test_unknown_returns_none(self):
         app.COOKIE_FILE = ""
@@ -190,6 +218,60 @@ class FileEndpointAuthTest(unittest.TestCase):
             "/api/download/job-auth/file", environ_base={"REMOTE_ADDR": "1.2.3.4"}
         )
         self.assertEqual(resp.status_code, 404)
+
+
+class _FakeYDL:
+    def __init__(self, result):
+        self._result = result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def extract_info(self, url, download=False):
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+class HealthCheckTest(unittest.TestCase):
+    """/api/health classifies YouTube extraction status correctly."""
+
+    def test_ok_when_extraction_succeeds(self):
+        with mock.patch.object(
+            app.yt_dlp, "YoutubeDL",
+            return_value=_FakeYDL({"id": "jNQXAC9IVRw", "title": "Me at the zoo"}),
+        ):
+            result = app._run_health_check()
+        self.assertEqual(result["status"], "ok")
+        self.assertIsNone(result["detail"])
+
+    def test_blocked_when_bot_check(self):
+        bot = Exception("Sign in to confirm you're not a bot.")
+        with mock.patch.object(
+            app.yt_dlp, "YoutubeDL", return_value=_FakeYDL(bot),
+        ):
+            result = app._run_health_check()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("bot check", result["detail"])
+
+    def test_error_when_extraction_returns_nothing(self):
+        with mock.patch.object(
+            app.yt_dlp, "YoutubeDL", return_value=_FakeYDL(None),
+        ):
+            result = app._run_health_check()
+        self.assertEqual(result["status"], "error")
+
+    def test_error_when_unknown_exception(self):
+        with mock.patch.object(
+            app.yt_dlp, "YoutubeDL",
+            return_value=_FakeYDL(Exception("something broke")),
+        ):
+            result = app._run_health_check()
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["exception"], "Exception")
 
 
 class UniqueZipNameTest(unittest.TestCase):

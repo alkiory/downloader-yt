@@ -20,7 +20,7 @@ import shutil
 import time
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 # Configure logging
@@ -85,6 +85,13 @@ YOUTUBE_PLAYER_CLIENTS = [
 COOKIE_FILE = os.environ.get("COOKIE_FILE", "").strip()
 YOUTUBE_PROXY = os.environ.get("YOUTUBE_PROXY", "").strip()
 
+# /api/health probes this stable public video to see if YouTube extraction
+# currently works. Results are cached to avoid re-hitting YouTube on every poll.
+HEALTH_CHECK_URL = os.environ.get(
+    "HEALTH_CHECK_URL", "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+)
+HEALTH_CHECK_TTL_SECONDS = int(os.environ.get("HEALTH_CHECK_TTL_SECONDS", "60"))
+
 # When true, /api/info surfaces the underlying yt-dlp exception so the
 # exact failure mode (403 / bot check / extractor error / etc.) is visible.
 # Toggle on while debugging, off for normal users.
@@ -100,6 +107,10 @@ jobs_lock = threading.Lock()
 # Store download history for rate limiting
 download_history = defaultdict(list)
 history_lock = threading.Lock()
+
+# Cached result of the last /api/health YouTube probe.
+health_cache = {"checked_at": None, "result": None}
+health_cache_lock = threading.Lock()
 
 
 def sanitize_filename(filename):
@@ -248,7 +259,6 @@ def get_ydl_opts(output_path=None, progress_hook=None):
         "no_warnings": True,
         "extract_flat": False,
         "force_generic_extractor": False,
-        "ignoreerrors": True,
         "no_color": True,
         "socket_timeout": 30,
         "retries": 3,
@@ -277,7 +287,6 @@ def get_info_opts():
         "no_warnings": True,
         "extract_flat": "in_playlist",
         "force_generic_extractor": False,
-        "ignoreerrors": True,
         "no_color": True,
         "socket_timeout": 30,
         "retries": 3,
@@ -289,6 +298,51 @@ def get_info_opts():
         },
     }
     return _apply_auth_opts(opts)
+
+
+def _file_is_writable(path):
+    """True if `path` can be opened for append (writable mount + perms).
+
+    Render mounts secret files on a read-only filesystem, which makes any
+    write return EROFS even if the mode bits look writable. An actual open-for-
+    append probe is the only reliable way to detect that.
+    """
+    try:
+        with open(path, "a"):
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def _writable_cookie_file():
+    """Return a writable path to the configured cookies file, or None.
+
+    yt-dlp saves the cookie jar back to the file after each request, so it
+    must point at a writable file. If COOKIE_FILE is read-only (e.g. a Render
+    secret file), copy it into the writable temp dir first.
+    """
+    if not COOKIE_FILE or not os.path.isfile(COOKIE_FILE):
+        if COOKIE_FILE:
+            logger.warning(
+                f"COOKIE_FILE is set but not found at {COOKIE_FILE}; "
+                "continuing without cookies"
+            )
+        return None
+
+    if _file_is_writable(COOKIE_FILE):
+        return COOKIE_FILE
+
+    dest = TEMP_DIR / "cookies.txt"
+    try:
+        shutil.copyfile(COOKIE_FILE, dest)
+        return str(dest)
+    except OSError as e:
+        logger.warning(
+            f"COOKIE_FILE is read-only and could not be copied to {dest}: {e}; "
+            "continuing without cookies"
+        )
+        return None
 
 
 def _apply_auth_opts(opts):
@@ -303,15 +357,9 @@ def _apply_auth_opts(opts):
     YOUTUBE_PROXY — e.g. "http://user:pass@residential-proxy:port".
     """
     if COOKIE_FILE:
-        if os.path.isfile(COOKIE_FILE):
-            opts["cookiefile"] = COOKIE_FILE
-        else:
-            # Don't let a missing/misconfigured cookie file hard-fail every
-            # request; fall back to anonymous extraction and warn loudly.
-            logger.warning(
-                f"COOKIE_FILE is set but not found at {COOKIE_FILE}; "
-                "continuing without cookies"
-            )
+        cookie_path = _writable_cookie_file()
+        if cookie_path:
+            opts["cookiefile"] = cookie_path
     if YOUTUBE_PROXY:
         opts["proxy"] = YOUTUBE_PROXY
     return opts
@@ -335,7 +383,7 @@ def _friendly_ytdlp_error(exc):
             )
         return "YouTube is blocking this server with a bot check. Try again later."
 
-    if "sign in" in msg or "cookies" in msg or "login" in msg:
+    if "sign in" in msg or "login" in msg:
         if COOKIE_FILE:
             return "Your YouTube session has expired. Refresh cookies.txt and try again."
         return "This video requires sign-in (it may be age-restricted or members-only)."
@@ -347,6 +395,37 @@ def _friendly_ytdlp_error(exc):
         return "This video is unavailable (private, region-locked, or removed)."
 
     return None
+
+
+def _run_health_check():
+    """Probe a canary YouTube video and report extraction status.
+
+    Returns a dict with status "ok" (extraction works), "blocked" (bot check)
+    or "error" (anything else), plus the friendly detail when it fails.
+    """
+    result = {
+        "status": "ok",
+        "detail": None,
+        "exception": None,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "cookies_configured": bool(COOKIE_FILE),
+        "proxy_configured": bool(YOUTUBE_PROXY),
+        "canary_url": HEALTH_CHECK_URL,
+        "ttl_seconds": HEALTH_CHECK_TTL_SECONDS,
+    }
+    try:
+        with yt_dlp.YoutubeDL(get_info_opts()) as ydl:
+            info = ydl.extract_info(HEALTH_CHECK_URL, download=False)
+        if not info or not info.get("id"):
+            result["status"] = "error"
+            result["detail"] = "Extraction returned no result"
+        return result
+    except Exception as e:
+        msg = str(e) or ""
+        result["exception"] = type(e).__name__
+        result["detail"] = _friendly_ytdlp_error(e) or msg[:300]
+        result["status"] = "blocked" if "not a bot" in msg.lower() else "error"
+        return result
 
 
 def convert_to_mp3(input_file, output_file):
@@ -663,6 +742,32 @@ def version_info():
             "image_build_id": os.environ.get("IMAGE_BUILD_ID", "unset"),
         }
     )
+
+
+@app.route("/api/health", methods=["GET"])
+def health_check():
+    """Report whether YouTube extraction currently works or is blocked.
+
+    Probes a canary video through the normal extraction path and caches the
+    result for HEALTH_CHECK_TTL_SECONDS so repeated polls don't hammer YouTube.
+    """
+    now = time.time()
+    with health_cache_lock:
+        checked_at = health_cache["checked_at"]
+        if checked_at is not None and (now - checked_at) < HEALTH_CHECK_TTL_SECONDS:
+            resp = dict(health_cache["result"])
+            resp["cached"] = True
+            return jsonify(resp)
+
+    result = _run_health_check()
+
+    with health_cache_lock:
+        health_cache["checked_at"] = time.time()
+        health_cache["result"] = result
+
+    resp = dict(result)
+    resp["cached"] = False
+    return jsonify(resp)
 
 
 @app.route("/api/download", methods=["POST"])
