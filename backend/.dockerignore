@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+
+# App
+downloads/
+*.log
+.env
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Build metadata
+Dockerfile
+.dockerignore

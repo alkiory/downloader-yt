@@ -1,0 +1,44 @@
+services:
+  youtube-downloader:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: youtube-audio-downloader
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+      - MAX_PLAYLIST_SIZE=50
+      - MAX_DOWNLOADS_PER_HOUR=10
+      - MAX_DOWNLOADS_PER_DAY=50
+      - MAX_FILE_SIZE_MB=50
+      - MAX_CONCURRENT_DOWNLOADS=3
+      - DOWNLOAD_TIMEOUT=300
+      - PORT=5000
+      - BITRATE=192
+      - DOWNLOAD_DIR=/app/downloads
+      - USE_X_FORWARDED_FOR=false
+      - RATE_LIMIT_ENABLED=true
+    volumes:
+      - downloads:/app/downloads
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - downloader-network
+
+networks:
+  downloader-network:
+    driver: bridge
+
+volumes:
+  downloads:
