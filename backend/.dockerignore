@@ -11,6 +11,7 @@ venv/
 downloads/
 *.log
 .env
+.env.*
 
 # Editors / OS
 .DS_Store

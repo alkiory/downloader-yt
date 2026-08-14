@@ -11,3 +11,5 @@ downloads/
 .idea/
 .vscode/
 .env
+.env.*
+!.env.example

@@ -1,0 +1,52 @@
+# Render Blueprint (Infrastructure as Code).
+# See https://render.com/docs/blueprint-spec
+#
+# IMPORTANT: if you already have a service deployed (e.g. downloader-yt-latest),
+# set `name` below to match that existing service name so this blueprint UPDATES
+# it instead of creating a second service.
+
+services:
+  - type: web
+    name: youtube-audio-downloader # <-- match your existing service name to update it
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    # Use `free` for the no-cost tier. Remove this line to keep a paid plan.
+    plan: free
+    region: oregon
+    healthCheckPath: /
+
+    envVars:
+      # ---- Core runtime ----
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Match the directory the Dockerfile pre-creates with uid-1000 ownership.
+      - key: DOWNLOAD_DIR
+        value: /app/downloads
+      # Render sits behind a reverse proxy that appends the real client IP to
+      # X-Forwarded-For; trust the rightmost entry (see rate_limiter.py).
+      - key: USE_X_FORWARDED_FOR
+        value: "true"
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+      - key: RATE_LIMIT_STORAGE
+        value: memory
+      # Player clients yt-dlp tries, in order. `web` is omitted on purpose (it
+      # now needs a PO token and is the most bot-checked from datacenter IPs).
+      - key: YOUTUBE_PLAYER_CLIENTS
+        value: android,ios
+      # Turn on to expose the underlying yt-dlp error in /api/info responses
+      # while debugging the bot check. Keep false for normal users.
+      - key: DEBUG_INFO
+        value: "false"
+
+      # ---- YouTube bot-check workarounds (runtime, NOT baked into the image) ----
+      # Path to the cookies.txt secret file. Add it in the Render dashboard:
+      #   Service -> Environment -> Secret Files -> Filename: "cookies.txt"
+      # Render mounts it at /etc/secrets/cookies.txt.
+      - key: COOKIE_FILE
+        value: /etc/secrets/cookies.txt
+      # Residential proxy URL (e.g. http://user:pass@host:port). Secret value:
+      # Render prompts for this when you first create the Blueprint.
+      - key: YOUTUBE_PROXY
+        sync: false

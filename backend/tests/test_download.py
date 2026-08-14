@@ -61,6 +61,47 @@ class GetYdlOptsTest(unittest.TestCase):
         self.assertEqual(opts["progress_hooks"], [sentinel])
 
 
+class AuthOptsTest(unittest.TestCase):
+    """Cookies.txt / proxy are wired into yt-dlp opts only when configured."""
+
+    def setUp(self):
+        self._saved = (app.COOKIE_FILE, app.YOUTUBE_PROXY)
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+        self._tmp.write(b"# Netscape HTTP Cookie File")
+        self._tmp.close()
+
+    def tearDown(self):
+        app.COOKIE_FILE, app.YOUTUBE_PROXY = self._saved
+        os.unlink(self._tmp.name)
+
+    def test_no_auth_opts_by_default(self):
+        app.COOKIE_FILE = ""
+        app.YOUTUBE_PROXY = ""
+        for opts in (app.get_ydl_opts(), app.get_info_opts()):
+            self.assertNotIn("cookiefile", opts)
+            self.assertNotIn("proxy", opts)
+
+    def test_cookie_file_is_passed_when_present(self):
+        app.COOKIE_FILE = self._tmp.name
+        app.YOUTUBE_PROXY = ""
+        for opts in (app.get_ydl_opts(), app.get_info_opts()):
+            self.assertEqual(opts["cookiefile"], self._tmp.name)
+            self.assertNotIn("proxy", opts)
+
+    def test_missing_cookie_file_is_skipped(self):
+        app.COOKIE_FILE = "/nonexistent/cookies.txt"
+        app.YOUTUBE_PROXY = ""
+        for opts in (app.get_ydl_opts(), app.get_info_opts()):
+            self.assertNotIn("cookiefile", opts)
+
+    def test_proxy_is_passed(self):
+        app.COOKIE_FILE = ""
+        app.YOUTUBE_PROXY = "http://user:pass@proxy.example:8080"
+        for opts in (app.get_ydl_opts(), app.get_info_opts()):
+            self.assertEqual(opts["proxy"], "http://user:pass@proxy.example:8080")
+            self.assertNotIn("cookiefile", opts)
+
+
 class FileEndpointAuthTest(unittest.TestCase):
     def setUp(self):
         self.client = app.app.test_client()

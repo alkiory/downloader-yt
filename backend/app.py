@@ -32,7 +32,18 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Restrict CORS to same-origin only
-CORS(app, resources={r"/api/*": {"origins": []}})
+CORS(
+    app,
+    resources={
+        r"/api/*": {
+            "origins": [
+                "https://downloader-yt-latest.onrender.com",
+                "http://localhost:5000",
+                "http://127.0.0.1:5000",
+            ]
+        }
+    },
+)
 
 # Initialize rate limiter
 limiter = create_limiter(app)
@@ -58,6 +69,26 @@ DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", "300"))
 PORT = int(os.environ.get("PORT", "5000"))
 BITRATE = os.environ.get("BITRATE", "192")
 JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", "3600"))  # 1 hour
+
+# Which YouTube player clients yt-dlp should try, in order. The `web` client
+# now requires a PO token and is the one most aggressively bot-checked from
+# datacenter IPs (Render), so it is NOT in the default. This is a moving
+# target — override via YOUTUBE_PLAYER_CLIENTS="android,ios,tv" if needed.
+YOUTUBE_PLAYER_CLIENTS = [
+    c.strip()
+    for c in os.environ.get("YOUTUBE_PLAYER_CLIENTS", "android,ios").split(",")
+    if c.strip()
+]
+
+# Optional auth/egress knobs for getting past YouTube's bot check on
+# datacenter IPs. See _apply_auth_opts() for details.
+COOKIE_FILE = os.environ.get("COOKIE_FILE", "").strip()
+YOUTUBE_PROXY = os.environ.get("YOUTUBE_PROXY", "").strip()
+
+# When true, /api/info surfaces the underlying yt-dlp exception so the
+# exact failure mode (403 / bot check / extractor error / etc.) is visible.
+# Toggle on while debugging, off for normal users.
+DEBUG_INFO = os.environ.get("DEBUG_INFO", "false").lower() == "true"
 
 # Thread pool for downloads
 download_executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DOWNLOADS)
@@ -229,19 +260,19 @@ def get_ydl_opts(output_path=None, progress_hook=None):
         "max_filesize": MAX_FILE_SIZE_MB * 1024 * 1024,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web"],
+                "player_client": YOUTUBE_PLAYER_CLIENTS,
                 "skip": ["hls", "dash", "translated_subs"],
             }
         },
     }
     if progress_hook:
         opts["progress_hooks"] = [progress_hook]
-    return opts
+    return _apply_auth_opts(opts)
 
 
 def get_info_opts():
     """Get yt-dlp options for info extraction"""
-    return {
+    opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": "in_playlist",
@@ -252,11 +283,38 @@ def get_info_opts():
         "retries": 3,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web"],
+                "player_client": YOUTUBE_PLAYER_CLIENTS,
                 "skip": ["hls", "dash", "translated_subs"],
             }
         },
     }
+    return _apply_auth_opts(opts)
+
+
+def _apply_auth_opts(opts):
+    """Attach optional cookies.txt / proxy settings to yt-dlp options.
+
+    On datacenter IPs (Render) YouTube bot-checks anonymous requests, so a
+    deployed instance can authenticate with browser cookies and/or route
+    through a residential proxy to escape IP flagging.
+
+    COOKIE_FILE  — path to a Netscape-format cookies.txt exported from a
+                   logged-in browser session (mounted into the container).
+    YOUTUBE_PROXY — e.g. "http://user:pass@residential-proxy:port".
+    """
+    if COOKIE_FILE:
+        if os.path.isfile(COOKIE_FILE):
+            opts["cookiefile"] = COOKIE_FILE
+        else:
+            # Don't let a missing/misconfigured cookie file hard-fail every
+            # request; fall back to anonymous extraction and warn loudly.
+            logger.warning(
+                f"COOKIE_FILE is set but not found at {COOKIE_FILE}; "
+                "continuing without cookies"
+            )
+    if YOUTUBE_PROXY:
+        opts["proxy"] = YOUTUBE_PROXY
+    return opts
 
 
 def convert_to_mp3(input_file, output_file):
@@ -349,7 +407,7 @@ def download_single_video(url, job_id, client_ip):
             download_jobs[job_id]["error"] = "Failed to download video"
 
     except Exception as e:
-        logger.error(f"Download error for job {job_id}: {str(e)}")
+        logger.exception(f"Download error for job {job_id}: {str(e)}")
         with jobs_lock:
             download_jobs[job_id]["status"] = "failed"
             download_jobs[job_id]["error"] = "Download failed"
@@ -429,7 +487,9 @@ def download_playlist(url, job_id, client_ip):
                                     downloaded_files.append(
                                         {
                                             "title": title,
-                                            "filename": unique_zip_name(title, used_names),
+                                            "filename": unique_zip_name(
+                                                title, used_names
+                                            ),
                                             "file": str(final_path),
                                         }
                                     )
@@ -467,7 +527,7 @@ def download_playlist(url, job_id, client_ip):
             record_download(client_ip)
 
     except Exception as e:
-        logger.error(f"Playlist download error for job {job_id}: {str(e)}")
+        logger.exception(f"Playlist download error for job {job_id}: {str(e)}")
         with jobs_lock:
             download_jobs[job_id]["status"] = "failed"
             download_jobs[job_id]["error"] = "Download failed"
@@ -540,8 +600,31 @@ def get_video_info():
                 )
 
     except Exception as e:
-        logger.error(f"Info error: {str(e)}")
-        return jsonify({"error": "Could not fetch video information"}), 500
+        logger.exception(f"Info error [{type(e).__name__}]: {str(e)}")
+        body = {"error": "Could not fetch video information"}
+        if DEBUG_INFO:
+            body["exception"] = type(e).__name__
+            body["detail"] = (str(e) or "")[:500]
+        return jsonify(body), 500
+
+
+@app.route("/api/version", methods=["GET"])
+def version_info():
+    """Self-report image build marker and baked-in dependency versions."""
+    import sys
+
+    try:
+        ytdlp_version = yt_dlp.version.__version__
+    except AttributeError:
+        ytdlp_version = getattr(yt_dlp, "__version__", "unknown")
+
+    return jsonify(
+        {
+            "yt_dlp_version": ytdlp_version,
+            "python_version": sys.version.split()[0],
+            "image_build_id": os.environ.get("IMAGE_BUILD_ID", "unset"),
+        }
+    )
 
 
 @app.route("/api/download", methods=["POST"])

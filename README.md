@@ -45,6 +45,9 @@ Copy `.env.example` to `.env` and adjust as needed:
 - `PORT`: Application port (default: 5000)
 - `DOWNLOAD_DIR`: Directory for finished downloads
 - `RATE_LIMIT_ENABLED`: Enable rate limiting (`true`/`false`, default: `false` — set `true` when running online)
+- `YOUTUBE_PLAYER_CLIENTS`: YouTube player clients yt-dlp tries, in order (default: `android,ios`)
+- `COOKIE_FILE`: Path to a Netscape-format `cookies.txt` from a logged-in browser session (for datacenter hosts)
+- `YOUTUBE_PROXY`: Proxy URL (e.g. `http://user:pass@residential-proxy:port`) to escape datacenter-IP flagging
 
 ## Tests
 
@@ -72,6 +75,12 @@ docker-compose up -d
 # Check logs
 docker-compose logs -f
 ```
+
+> **YouTube bot check on cloud hosts:** datacenter IPs (Render, AWS, etc.) are often
+> asked to *"Sign in to confirm you're not a bot."* To work around it, export a
+> `cookies.txt` from a logged-in browser and set `COOKIE_FILE=/cookies/cookies.txt`
+> (mount it read-only), and/or set `YOUTUBE_PROXY` to a residential proxy. Rebuild
+> the image regularly so yt-dlp stays current — YouTube breaks old extractors often.
 
 ## Legal Notice
 

@@ -20,8 +20,13 @@ services:
       - DOWNLOAD_DIR=/app/downloads
       - USE_X_FORWARDED_FOR=false
       - RATE_LIMIT_ENABLED=true
+      # Optional: get past YouTube's bot check on datacenter IPs.
+      # - COOKIE_FILE=/cookies/cookies.txt
+      # - YOUTUBE_PROXY=http://user:pass@residential-proxy:port
+      # - YOUTUBE_PLAYER_CLIENTS=android,ios,tv
     volumes:
       - downloads:/app/downloads
+      # - ./cookies:/cookies:ro
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

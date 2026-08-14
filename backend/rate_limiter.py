@@ -11,21 +11,29 @@ TRUSTED_PROXIES = (
     if os.environ.get("TRUSTED_PROXIES")
     else set()
 )
-USE_X_FORWARDED_FOR = os.environ.get("USE_X_FORWARDED_FOR", "false").lower() == "true"
-RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "false").lower() == "true"
+USE_X_FORWARDED_FOR = (
+    os.environ.get("USE_X_FORWARDED_FOR", "true").lower() == "true"
+)  # Enable for Render
+RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "true").lower() == "true"
 
 
 def get_client_ip():
-    """Get client IP address safely, respecting trusted proxies"""
+    """Get the client IP, trusting only the reverse proxy directly in front of us.
+
+    X-Forwarded-For is appended to by each hop, so the *leftmost* entry is
+    client-supplied and spoofable; the *rightmost* entry is the IP the proxy
+    in front of us actually saw. On Render there is exactly one trusted proxy,
+    so we take the rightmost entry. When TRUSTED_PROXIES is set we additionally
+    require the immediate peer (request.remote_addr) to be one of them.
+    """
     if USE_X_FORWARDED_FOR:
         x_forwarded_for = request.headers.get("X-Forwarded-For")
         if x_forwarded_for:
             if TRUSTED_PROXIES:
-                remote_addr = request.remote_addr
-                if remote_addr in TRUSTED_PROXIES:
-                    return x_forwarded_for.split(",")[0].strip()
+                if request.remote_addr in TRUSTED_PROXIES:
+                    return x_forwarded_for.split(",")[-1].strip()
             else:
-                return x_forwarded_for.split(",")[0].strip()
+                return x_forwarded_for.split(",")[-1].strip()
 
     return request.remote_addr or "unknown"
 
@@ -36,9 +44,14 @@ def create_limiter(app):
 
     if storage_type == "redis":
         redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-        # Remove any existing prefix to avoid double-prefix
-        redis_url = redis_url.replace("redis://", "", 1).replace("rediss://", "", 1)
-        storage_uri = f"redis://{redis_url}"
+
+        # Preserve the scheme (redis:// or rediss://)
+        if redis_url.startswith("rediss://"):
+            storage_uri = redis_url
+        elif redis_url.startswith("redis://"):
+            storage_uri = redis_url
+        else:
+            storage_uri = f"redis://{redis_url}"
     else:
         storage_uri = "memory://"
 

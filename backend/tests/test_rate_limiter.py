@@ -19,13 +19,14 @@ class GetClientIpTest(unittest.TestCase):
                 self.assertEqual(rate_limiter.get_client_ip(), "1.2.3.4")
 
     def test_uses_xff_when_enabled_without_trusted_proxies(self):
+        # Rightmost entry wins: the leftmost is client-supplied and spoofable.
         with mock.patch.object(rate_limiter, "USE_X_FORWARDED_FOR", True), \
                 mock.patch.object(rate_limiter, "TRUSTED_PROXIES", set()):
             with self.app.test_request_context(
                 "/", environ_base={"REMOTE_ADDR": "1.2.3.4"},
                 headers={"X-Forwarded-For": "9.9.9.9, 8.8.8.8"},
             ):
-                self.assertEqual(rate_limiter.get_client_ip(), "9.9.9.9")
+                self.assertEqual(rate_limiter.get_client_ip(), "8.8.8.8")
 
     def test_uses_xff_only_from_trusted_proxy(self):
         with mock.patch.object(rate_limiter, "USE_X_FORWARDED_FOR", True), \
@@ -34,7 +35,7 @@ class GetClientIpTest(unittest.TestCase):
                 "/", environ_base={"REMOTE_ADDR": "1.2.3.4"},
                 headers={"X-Forwarded-For": "9.9.9.9, 8.8.8.8"},
             ):
-                self.assertEqual(rate_limiter.get_client_ip(), "9.9.9.9")
+                self.assertEqual(rate_limiter.get_client_ip(), "8.8.8.8")
 
     def test_ignores_xff_from_untrusted_proxy(self):
         with mock.patch.object(rate_limiter, "USE_X_FORWARDED_FOR", True), \
