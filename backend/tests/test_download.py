@@ -102,6 +102,48 @@ class AuthOptsTest(unittest.TestCase):
             self.assertNotIn("cookiefile", opts)
 
 
+class FriendlyYtdlpErrorTest(unittest.TestCase):
+    """yt-dlp failures map to actionable, user-safe messages."""
+
+    def setUp(self):
+        self._saved = app.COOKIE_FILE
+
+    def tearDown(self):
+        app.COOKIE_FILE = self._saved
+
+    def test_bot_check_without_cookies(self):
+        app.COOKIE_FILE = ""
+        msg = app._friendly_ytdlp_error(
+            Exception("Sign in to confirm you're not a bot.")
+        )
+        self.assertIn("bot check", msg)
+        self.assertNotIn("cookies", msg)
+
+    def test_bot_check_with_cookies_suggests_stale_cookies(self):
+        app.COOKIE_FILE = "/etc/secrets/cookies.txt"
+        msg = app._friendly_ytdlp_error(
+            Exception("Sign in to confirm you're not a bot.")
+        )
+        self.assertIn("expired", msg)
+        self.assertIn("cookies", msg)
+
+    def test_sign_in_error_with_cookies(self):
+        app.COOKIE_FILE = "/etc/secrets/cookies.txt"
+        msg = app._friendly_ytdlp_error(Exception("Sign in required"))
+        self.assertIn("expired", msg)
+
+    def test_403(self):
+        app.COOKIE_FILE = ""
+        msg = app._friendly_ytdlp_error(Exception("HTTP Error 403: Forbidden"))
+        self.assertIn("403", msg)
+
+    def test_unknown_returns_none(self):
+        app.COOKIE_FILE = ""
+        self.assertIsNone(
+            app._friendly_ytdlp_error(Exception("something else entirely"))
+        )
+
+
 class FileEndpointAuthTest(unittest.TestCase):
     def setUp(self):
         self.client = app.app.test_client()

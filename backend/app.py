@@ -317,6 +317,38 @@ def _apply_auth_opts(opts):
     return opts
 
 
+def _friendly_ytdlp_error(exc):
+    """Map a yt-dlp failure to a clear, user-safe message.
+
+    Returns None when no specific hint applies, so callers can fall back to a
+    generic message. The cookie hints matter most: if a bot check still fires
+    while COOKIE_FILE is configured, the cookies are almost certainly stale or
+    invalid and should be refreshed.
+    """
+    msg = (str(exc) or "").lower()
+
+    if "not a bot" in msg:
+        if COOKIE_FILE:
+            return (
+                "YouTube is still bot-checking the server. The configured "
+                "cookies are likely expired or invalid — refresh cookies.txt."
+            )
+        return "YouTube is blocking this server with a bot check. Try again later."
+
+    if "sign in" in msg or "cookies" in msg or "login" in msg:
+        if COOKIE_FILE:
+            return "Your YouTube session has expired. Refresh cookies.txt and try again."
+        return "This video requires sign-in (it may be age-restricted or members-only)."
+
+    if "http error 403" in msg or "forbidden" in msg:
+        return "YouTube rejected the request (403). The server IP may be rate-limited."
+
+    if "video unavailable" in msg or "not available" in msg or "private" in msg:
+        return "This video is unavailable (private, region-locked, or removed)."
+
+    return None
+
+
 def convert_to_mp3(input_file, output_file):
     """Convert video/audio file to MP3 using ffmpeg"""
     try:
@@ -410,7 +442,9 @@ def download_single_video(url, job_id, client_ip):
         logger.exception(f"Download error for job {job_id}: {str(e)}")
         with jobs_lock:
             download_jobs[job_id]["status"] = "failed"
-            download_jobs[job_id]["error"] = "Download failed"
+            download_jobs[job_id]["error"] = (
+                _friendly_ytdlp_error(e) or "Download failed"
+            )
 
 
 def download_playlist(url, job_id, client_ip):
@@ -530,7 +564,9 @@ def download_playlist(url, job_id, client_ip):
         logger.exception(f"Playlist download error for job {job_id}: {str(e)}")
         with jobs_lock:
             download_jobs[job_id]["status"] = "failed"
-            download_jobs[job_id]["error"] = "Download failed"
+            download_jobs[job_id]["error"] = (
+                _friendly_ytdlp_error(e) or "Download failed"
+            )
 
 
 @app.route("/")
@@ -601,7 +637,9 @@ def get_video_info():
 
     except Exception as e:
         logger.exception(f"Info error [{type(e).__name__}]: {str(e)}")
-        body = {"error": "Could not fetch video information"}
+        body = {
+            "error": _friendly_ytdlp_error(e) or "Could not fetch video information"
+        }
         if DEBUG_INFO:
             body["exception"] = type(e).__name__
             body["detail"] = (str(e) or "")[:500]
