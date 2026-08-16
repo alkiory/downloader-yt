@@ -428,7 +428,7 @@ def index():
 
 
 @app.route("/api/info", methods=["POST"])
-@limiter.limit("30 per minute", enabled=RATE_LIMIT_ENABLED)
+@limiter.limit("30 per minute")
 def get_video_info():
     data = request.json
     url = data.get("url")
@@ -488,7 +488,7 @@ def get_video_info():
 
 
 @app.route("/api/download", methods=["POST"])
-@limiter.limit("10 per minute", enabled=RATE_LIMIT_ENABLED)
+@limiter.limit("10 per minute")
 def download_video():
     data = request.json
     url = data.get("url")

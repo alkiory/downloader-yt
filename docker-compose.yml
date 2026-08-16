@@ -15,7 +15,6 @@ services:
       - MAX_FILE_SIZE_MB=250
       - MAX_CONCURRENT_DOWNLOADS=3
       - DOWNLOAD_TIMEOUT=300
-      - DOWNLOAD_LIVESTREAM_FROM_START=true
       - PORT=5000
       - BITRATE=192
       - DOWNLOAD_DIR=/app/downloads
@@ -24,16 +23,8 @@ services:
       # Only online deployments enable it, e.g. render.yaml sets it to true.
       # - RATE_LIMIT_ENABLED=true
       # - DEFAULT_RATE_LIMIT=60 per minute, 3600 per hour
-      # Optional: get past YouTube's bot check on datacenter IPs.
-      # - COOKIE_FILE=/cookies/cookies.txt
-      # - YOUTUBE_COOKIES_B64=base64-encoded-Netscape-cookies
-      # - YOUTUBE_COOKIE_BEHAVIOR=when_needed
-      # - YOUTUBE_USER_AGENT=Mozilla/5.0 ...
-      # - YOUTUBE_PROXY=http://user:pass@residential-proxy:port
-      # - YOUTUBE_PLAYER_CLIENTS=android,ios,tv
     volumes:
       - downloads:/app/downloads
-      # - ./cookies:/cookies:ro
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
