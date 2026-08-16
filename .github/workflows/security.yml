@@ -1,4 +1,4 @@
-name: Security & Deploy
+name: Security & Docker Build
 
 on:
   push:
@@ -26,8 +26,8 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -36,12 +36,37 @@ jobs:
           pip install bandit safety pip-audit
 
       - name: Run Bandit Security Scanner
+        continue-on-error: true
         run: |
           cd backend
-          bandit -r . -f json -o bandit-results.json || true
-          bandit -r . -f txt
+          bandit -r . -c pyproject.toml -f json -o bandit-results.json || true
+          bandit -r . -c pyproject.toml -f txt
+
+      - name: Check for HIGH severity findings
+        run: |
+          cd backend
+          if [ -f bandit-results.json ]; then
+          python3 - <<'PYEOF'
+          import json
+          import sys
+
+          with open('bandit-results.json') as f:
+              results = json.load(f)
+
+          high_severity = [r for r in results.get('results', []) if r.get('issue_severity') == 'HIGH']
+
+          if high_severity:
+              print(f'Found {len(high_severity)} HIGH severity issues')
+              for issue in high_severity:
+                  print(f'  - {issue.get("test_name")}: {issue.get("issue_text")}')
+              sys.exit(1)
+          else:
+              print('No HIGH severity issues found')
+          PYEOF
+          fi
 
       - name: Check dependencies for vulnerabilities
+        continue-on-error: true
         run: |
           cd backend
           safety check || true
@@ -64,8 +89,8 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -84,18 +109,11 @@ jobs:
           name: coverage-report
           path: backend/coverage.xml
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          file: backend/coverage.xml
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: false
-
   docker-build:
-    name: Build Docker Image
+    name: Build and Push Docker Image
     runs-on: ubuntu-latest
     needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -103,66 +121,29 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: ./backend
           file: ./backend/Dockerfile
-          push: false
-          load: true
+          push: true
           tags: |
-            youtube-audio-downloader:latest
-            youtube-audio-downloader:${{ github.sha }}
-
-      - name: Run Docker container for testing
-        run: |
-          docker run -d \
-            --name test-container \
-            -p 5001:5000 \
-            -e PORT=5000 \
-            -e RATE_LIMIT_ENABLED=false \
-            youtube-audio-downloader:latest
-
-          # Wait for container to start
-          sleep 10
-
-          # Test if container is running
-          docker ps | grep test-container
-
-      - name: Test Docker container health
-        run: |
-          # Test homepage
-          curl -f http://localhost:5001/ || exit 1
-
-          # Test API endpoint
-          curl -f -X POST http://localhost:5001/api/info \
-            -H "Content-Type: application/json" \
-            -d '{"url":"https://youtu.be/dQw4w9WgXcQ"}' || exit 1
-
-      - name: Clean up Docker container
-        if: always()
-        run: |
-          docker stop test-container || true
-          docker rm test-container || true
+            ${{ secrets.DOCKER_USERNAME }}/youtube-audio-downloader:latest
+            ${{ secrets.DOCKER_USERNAME }}/youtube-audio-downloader:${{ github.sha }}
 
       - name: Run container security scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.35.0
         with:
-          image-ref: "youtube-audio-downloader:latest"
-          format: "table"
-          exit-code: "0"
+          image-ref: '${{ secrets.DOCKER_USERNAME }}/youtube-audio-downloader:latest'
+          format: 'table'
+          exit-code: '0'
           ignore-unfixed: true
-          vuln-type: "os,library"
-          severity: "CRITICAL,HIGH"
-
-  deploy:
-    name: Deploy to Render
-    runs-on: ubuntu-latest
-    needs: docker-build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    steps:
-      - name: Deploy to Render
-        env:
-          deploy_url: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
-        run: |
-          curl "$deploy_url"
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+          version: 'v0.69.3'

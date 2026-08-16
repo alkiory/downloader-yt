@@ -1,0 +1,16 @@
+[tool.bandit]
+exclude_dirs = ["tests", "venv", "__pycache__"]
+skips = [
+    "B404",  # subprocess import - used safely with argument lists
+    "B603",  # subprocess without shell - we don't use shell=True
+    "B607",  # partial executable path - system-installed ffmpeg/ffprobe
+    "B104",  # bind to all interfaces - required for Docker/Render deployment
+    "B108",  # hardcoded tmp directory - we use secure permissions (0o700)
+]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
