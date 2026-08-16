@@ -151,6 +151,42 @@ variable is set.
 > operational requirements for a cloud deployment, not a promise that YouTube
 > will permit every video or account.
 
+## Security Features
+
+This application implements multiple security measures:
+
+### SSRF Protection
+- Domain allowlist (YouTube domains only)
+- Comprehensive IP validation (blocks private, loopback, link-local, reserved IPs)
+- IPv4 and IPv6 support
+- Documentation and CGNAT range blocking
+
+### Rate Limiting
+- Configurable hourly and daily limits per IP
+- Flask-Limiter integration
+- Redis support for distributed rate limiting
+
+### Input Validation
+- URL validation before processing
+- Filename sanitization to prevent path traversal
+- Max file size limits
+
+### XSS Prevention
+- DOM-based rendering (no innerHTML)
+- textContent for all dynamic content
+- No raw HTML injection
+
+### Container Security
+- Non-root user in Docker
+- Capability dropping (cap_drop: ALL)
+- no-new-privileges flag
+- Minimal base image
+
+### Error Handling
+- Generic error messages (no internal details leaked)
+- Proper logging
+- No stack traces exposed to clients
+
 ## Legal Notice
 
 This tool is for personal use only. Downloading videos or audio from YouTube may violate YouTube's Terms of Service. You are solely responsible for ensuring you have the rights to any content you download and for complying with all applicable laws. Do not download or distribute copyrighted material without permission.

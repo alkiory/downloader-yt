@@ -48,9 +48,6 @@
       --success: #4caf50;
       --page-bg: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       --input-bg: #ffffff;
-      --legal-bg: #fff8e1;
-      --legal-border: #ffe0b2;
-      --legal-text: #8a6d3b;
       --error-bg: #fff0f0;
       --error-text: #d32f2f;
       --success-bg: #f0fff0;
@@ -69,9 +66,6 @@
       --border: #484a4f;
       --page-bg: linear-gradient(135deg, #171b35 0%, #302044 100%);
       --input-bg: #202124;
-      --legal-bg: #3b321c;
-      --legal-border: #66521f;
-      --legal-text: #f2d28b;
       --error-bg: #3c2023;
       --error-text: #ffaaa9;
       --success-bg: #1d3827;
@@ -90,9 +84,6 @@
         --border: #484a4f;
         --page-bg: linear-gradient(135deg, #171b35 0%, #302044 100%);
         --input-bg: #202124;
-        --legal-bg: #3b321c;
-        --legal-border: #66521f;
-        --legal-text: #f2d28b;
         --error-bg: #3c2023;
         --error-text: #ffaaa9;
         --success-bg: #1d3827;
@@ -234,18 +225,6 @@
       color: var(--text-light);
       font-size: 14px;
       line-height: 1.5;
-    }
-
-    .legal-notice {
-      background: var(--legal-bg);
-      border: 1px solid var(--legal-border);
-      color: var(--legal-text);
-      border-radius: var(--radius);
-      padding: 12px 16px;
-      font-size: 13px;
-      line-height: 1.5;
-      margin-bottom: 20px;
-      text-align: center;
     }
 
     .input-group {
@@ -717,7 +696,8 @@
             </svg>
             <svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="4" />
-              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+              <path
+                d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
             </svg>
             <span id="themeToggleLabel">Dark mode</span>
           </button>
@@ -731,12 +711,6 @@
         <p class="subtitle">Download MP3 audio from YouTube videos and playlists. Perfect for offline listening
           anywhere, anytime!</p>
       </header>
-
-      <div class="legal-notice" role="note">
-        <strong>⚖️ Legal notice</strong> — This tool is for <strong>personal use only</strong>. Downloading copyrighted
-        material without permission may violate YouTube's Terms of Service and copyright law. You are solely responsible
-        for ensuring you have the right to download any content.
-      </div>
 
       <form id="downloadForm" onsubmit="handleSubmit(event)">
         <div class="input-group">

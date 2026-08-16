@@ -1,0 +1,168 @@
+name: Security & Deploy
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install bandit safety pip-audit
+
+      - name: Run Bandit Security Scanner
+        run: |
+          cd backend
+          bandit -r . -f json -o bandit-results.json || true
+          bandit -r . -f txt
+
+      - name: Check dependencies for vulnerabilities
+        run: |
+          cd backend
+          safety check || true
+          pip-audit || true
+
+      - name: Upload Bandit results
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan-results
+          path: backend/bandit-results.json
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: security-scan
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run unit tests with coverage
+        run: |
+          cd backend
+          python -m pytest tests/ -v --cov=. --cov-report=xml --cov-report=term
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: backend/coverage.xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: backend/coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          load: true
+          tags: |
+            youtube-audio-downloader:latest
+            youtube-audio-downloader:${{ github.sha }}
+
+      - name: Run Docker container for testing
+        run: |
+          docker run -d \
+            --name test-container \
+            -p 5001:5000 \
+            -e PORT=5000 \
+            -e RATE_LIMIT_ENABLED=false \
+            youtube-audio-downloader:latest
+
+          # Wait for container to start
+          sleep 10
+
+          # Test if container is running
+          docker ps | grep test-container
+
+      - name: Test Docker container health
+        run: |
+          # Test homepage
+          curl -f http://localhost:5001/ || exit 1
+
+          # Test API endpoint
+          curl -f -X POST http://localhost:5001/api/info \
+            -H "Content-Type: application/json" \
+            -d '{"url":"https://youtu.be/dQw4w9WgXcQ"}' || exit 1
+
+      - name: Clean up Docker container
+        if: always()
+        run: |
+          docker stop test-container || true
+          docker rm test-container || true
+
+      - name: Run container security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "youtube-audio-downloader:latest"
+          format: "table"
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          severity: "CRITICAL,HIGH"
+
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Deploy to Render
+        env:
+          deploy_url: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          curl "$deploy_url"
